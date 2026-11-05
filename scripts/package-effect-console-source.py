@@ -40,16 +40,14 @@ script_names = ['build-native-plugin.ps1', 'build-installer-exe.ps1', 'build-eff
     'parameter-qa-relay.cjs', 'parameter-qa-relay-tests.cjs', 'build-qa-host-identity.ps1', 'build-qa-parameter-inspect.ps1',
     'qa_process_memory.py', 'test-qa-process-memory.py', 'qa_parameter_observer.py', 'test-qa-parameter-observer.py',
     'qa_parameter_topology.py', 'test-qa-parameter-topology.py', 'qa_parameter_encoding.py', 'test-qa-parameter-encoding.py',
-    'qa_parameter_recovery.py', 'test-qa-parameter-recovery.py', 'parameter-reference-tests.cjs',
+    'qa_parameter_recovery.py', 'test-qa-parameter-recovery.py',
     'export-effect-inventory.jsx', 'effect-inventory-tests.cjs',
     'generate-effect-translations.cjs', 'generate-effect-translations-tests.cjs', 'display-label-tests.cjs',
     'audit-effect-catalog.cjs', 'effect-catalog-tests.cjs',
     'export-effect-availability.jsx', 'effect-availability-tests.cjs', 'test-layer-styles-in-ae.jsx']
 files += [Path('scripts') / name for name in script_names]
-files += [Path('translation') / name for name in ['README.md', 'NATIVE-IPC-CONTRACT.md', 'auto-reference-scheduler.cjs', 'auto-translation-core.cjs', 'offline-worker-protocol.cjs', 'machine-cache.cjs', 'ae-terminology.cjs', 'offline-nmt-worker.cjs', 'native-reference-service.cjs']]
-files += [Path('scripts') / name for name in ['auto-reference-scheduler-tests.cjs', 'auto-translation-core-tests.cjs', 'offline-worker-protocol-tests.cjs', 'machine-cache-tests.cjs', 'offline-nmt-worker-tests.cjs', 'native-reference-service-tests.cjs', 'offline-translation-client-contract-tests.cjs', 'offline-service-smoke.cjs', 'offline-english-translation-evidence.cjs', 'offline-client-fixture.cjs', 'package-offline-translation.py', 'test-package-offline-translation.py', 'run-offline-pipeline-tests.ps1']]
 files += [p.relative_to(root) for p in (root / 'scripts').glob('run-*-tests.ps1') if p.name != 'run-core-tests.ps1']
-files += [Path('Directory.Build.props'), Path('vendor/ae-sdk/README.txt'), Path('README.md'), Path('LOCALIZATION.md'), Path('PARAMETER-REFERENCE.md'), Path('CATALOG.md'), Path('LAYER-STYLES.md'), Path('INPUT-FIX.md'), Path('MENU-LABELS.md'), Path('PAINT-FIX.md'), Path('UPDATES.md'), Path('DEPENDENCY-NOTICES.md'), Path('VERSION'), Path('.gitignore'), Path('.gitattributes')]
+files += [Path('Directory.Build.props'), Path('vendor/ae-sdk/README.txt'), Path('README.md'), Path('LOCALIZATION.md'), Path('CATALOG.md'), Path('LAYER-STYLES.md'), Path('INPUT-FIX.md'), Path('MENU-LABELS.md'), Path('PAINT-FIX.md'), Path('UPDATES.md'), Path('DEPENDENCY-NOTICES.md'), Path('VERSION'), Path('.gitignore'), Path('.gitattributes')]
 # Validate the entire allowlist before creating an incomplete export.
 for rel in sorted(set(files)):
     if not (root / rel).is_file():

@@ -10,14 +10,3 @@ installer/*.exe
 installer/*.aex
 vendor/ae-sdk/*
 !vendor/ae-sdk/README.txt
-
-# Python caches (never source)
-__pycache__/
-*.pyc
-
-# Local build outputs
-artifacts/
-*.aex
-*.exe
-*.lib
-*.exp
