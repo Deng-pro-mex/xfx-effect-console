@@ -1,0 +1,21 @@
+# guid-typescript 1.0.9 - ISC (declared in package.json)
+# Source: https://www.npmjs.com/package/guid-typescript/v/1.0.9
+# Retrieved: 2026-11-04 via `npm pack <package>@<version>` from the public npm registry.
+# UPSTREAM PUBLISHES NO LICENSE FILE. The 1.0.9 npm tarball contains only dist/, package.json and README.md; package.json declares "license": "ISC" and no copyright line appears in the sources. The ISC text below is the canonical OpenBSD/ISC wording, NOT a reproduction of an upstream file, and the copyright holder string is unknown. This is an unresolved attribution gap, not a satisfied notice.
+# Verbatim upstream licence text follows; do not edit.
+
+ISC License
+
+Copyright (c) <copyright holder not stated by the upstream package>
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
