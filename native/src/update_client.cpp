@@ -161,7 +161,7 @@ void allowed_url(const std::string& input, bool api, bool redirected) {
     auto u = url(input);
     // The web path: either the fixed /releases/latest probe or a tag page derived from
     // the version we just discovered. Both are fixed strings, never caller supplied.
-    if (input == latest_url) return;
+    if (input == latest_url || input.rfind(latest_url + "?", 0) == 0) return;
     if (input.rfind(tag_prefix, 0) == 0 && input.find('/', tag_prefix.size()) == std::string::npos) return;
     if (api) { if (input != api_url || redirected) fail("API redirect refused"); return; }
     if (input.rfind(asset_prefix, 0) == 0) return;
@@ -253,8 +253,13 @@ struct Candidate { std::string version, notes, url, hash; uint64_t size = 0; };
 // Resolves /releases/latest to its tag name via the redirect Location header. No body
 // is read, so this is a single tiny request that costs no API quota.
 std::string latest_release_tag(const std::atomic<bool>& stop) {
+    // A cache-busting query keeps GitHub's CDN from serving an older redirect: the
+    // /releases/latest page is cached for a short while after a new release, and a
+    // stale answer would hide the update until the cache expired.
     allowed_url(latest_url, false, false);
-    auto response = open_response(latest_url);
+    auto response = open_response(latest_url + "?cb=" + std::to_string(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
     if (stop.load()) fail("Update cancelled");
     const bool redirect = response.status == 301 || response.status == 302 ||
         response.status == 303 || response.status == 307 || response.status == 308;
