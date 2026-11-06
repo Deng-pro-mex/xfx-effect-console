@@ -14,3 +14,8 @@ vendor/ae-sdk/*
 # Release upload staging (never source)
 dist-release/
 
+
+# Local install/test logs
+install.log
+*.install.log
+
