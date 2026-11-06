@@ -19,7 +19,7 @@ static ud::Response bytes(std::string body, unsigned code = 200, std::string loc
     }};
 }
 static std::string release(std::string version = "1.0.27", std::string digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", std::string flags = "") {
-    return "[{\"tag_name\":\"effect-console-v" + version + "\",\"draft\":false,\"prerelease\":false,\"body\":\"Notes \\u4e2d\\u6587\",\"assets\":[{\"name\":\"EffectConsoleInstaller-" + version + ".exe\",\"size\":3,\"browser_download_url\":\"https://github.com/X1039538408/yuanchuan-plugins/releases/download/effect-console-v" + version + "/EffectConsoleInstaller-" + version + ".exe\",\"digest\":\"" + digest + "\"}]" + flags + "}]";
+    return "[{\"tag_name\":\"effect-console-v" + version + "\",\"draft\":false,\"prerelease\":false,\"body\":\"Notes \\u4e2d\\u6587\",\"assets\":[{\"name\":\"EffectConsoleInstaller-" + version + ".exe\",\"size\":3,\"browser_download_url\":\"https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/effect-console-v" + version + "/EffectConsoleInstaller-" + version + ".exe\",\"digest\":\"" + digest + "\"}]" + flags + "}]";
 }
 static UpdateInfo settle(xfx::UpdateClient& c) {
     auto end = std::chrono::steady_clock::now() + 5s;
@@ -36,8 +36,8 @@ static UpdateInfo settle(xfx::UpdateClient& c) {
 #include <windows.h>
 #include <winioctl.h>
 namespace fs = std::filesystem;
-static const std::string api = "https://api.github.com/repos/X1039538408/yuanchuan-plugins/releases?per_page=100";
-static const std::string asset = "https://github.com/X1039538408/yuanchuan-plugins/releases/download/effect-console-v1.0.27/EffectConsoleInstaller-1.0.27.exe";
+static const std::string api = "https://api.github.com/repos/Deng-pro-mex/xfx-effect-console/releases?per_page=100";
+static const std::string asset = "https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/effect-console-v1.0.27/EffectConsoleInstaller-1.0.27.exe";
 static const std::string hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 static std::string changed(std::string s, const std::string& from, const std::string& to) {
     auto pos = s.find(from); require(pos != std::string::npos, "fixture replacement"); s.replace(pos, from.size(), to); return s;
@@ -113,7 +113,7 @@ static void digest_rules() {
     require(checked(release("1.0.27", "sha256:abc")).state == UpdateInfo::Failed, "short digest rejected");
 }
 static void url_rules() {
-    for (const auto& url : {"http://github.com/X1039538408/yuanchuan-plugins/releases/download/a/b", "https://evil.example/payload.exe", "https://github.com.evil.example/a", "https://github.com@evil.example/a", "https://github.com:444/X1039538408/yuanchuan-plugins/releases/download/a/b", "https://github.com/other/repo/releases/download/a/b", "https://github.com/X1039538408/yuanchuan-plugins/releases/download/a/%2e%2e/b", "https://github.com/X1039538408/yuanchuan-plugins/releases/download/a/b#frag"})
+    for (const auto& url : {"http://github.com/Deng-pro-mex/xfx-effect-console/releases/download/a/b", "https://evil.example/payload.exe", "https://github.com.evil.example/a", "https://github.com@evil.example/a", "https://github.com:444/Deng-pro-mex/xfx-effect-console/releases/download/a/b", "https://github.com/other/repo/releases/download/a/b", "https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/a/%2e%2e/b", "https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/a/b#frag"})
         require(checked(changed(release(), asset, url)).state == UpdateInfo::Failed, "untrusted asset URL refused");
 }
 static void download_ok() {
@@ -184,7 +184,7 @@ static void statuses_redirects() {
 }
 static void sums_fallback() {
     auto json = release("1.0.27", ""); auto p = json.find("\"digest\":\"\""); json.replace(p, 11, "\"digest\":null");
-    json = changed(json, "}]}]", "},{\"name\":\"SHA256SUMS.txt\",\"size\":100,\"browser_download_url\":\"https://github.com/X1039538408/yuanchuan-plugins/releases/download/effect-console-v1.0.27/SHA256SUMS.txt\"}]}]");
+    json = changed(json, "}]}]", "},{\"name\":\"SHA256SUMS.txt\",\"size\":100,\"browser_download_url\":\"https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/effect-console-v1.0.27/SHA256SUMS.txt\"}]}]");
     for (auto mode : {0, 1, 2}) {
         ud::testing_open = [json, mode](const std::string& url) {
             if (url == api) return bytes(json);
@@ -201,7 +201,7 @@ static void sums_fallback() {
 }
 static void sums_metadata_size() {
     auto json = changed(release(), "\"digest\":\"sha256:" + hash + "\"", "\"digest\":null");
-    json = changed(json, "}]}]", "},{\"name\":\"SHA256SUMS.txt\",\"size\":1,\"browser_download_url\":\"https://github.com/X1039538408/yuanchuan-plugins/releases/download/effect-console-v1.0.27/SHA256SUMS.txt\"}]}]");
+    json = changed(json, "}]}]", "},{\"name\":\"SHA256SUMS.txt\",\"size\":1,\"browser_download_url\":\"https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/effect-console-v1.0.27/SHA256SUMS.txt\"}]}]");
     ud::testing_open = [json](const std::string& u) { return bytes(u == api ? json : hash + "  EffectConsoleInstaller-1.0.27.exe\n"); };
     Temp t; xfx::UpdateClient c("1.0.26", t.root / "cache"); c.check(); require(settle(c).state == UpdateInfo::Failed, "checksum asset bytes must match declared size");
 }

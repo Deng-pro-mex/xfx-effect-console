@@ -27,8 +27,8 @@ namespace xfx {
 namespace update_detail {
 constexpr size_t metadata_limit = 2 * 1024 * 1024, sums_limit = 256 * 1024;
 constexpr uint64_t installer_limit = 256ull * 1024 * 1024;
-const std::string api_url = "https://api.github.com/repos/X1039538408/yuanchuan-plugins/releases?per_page=100";
-const std::string asset_prefix = "https://github.com/X1039538408/yuanchuan-plugins/releases/download/";
+const std::string api_url = "https://api.github.com/repos/Deng-pro-mex/xfx-effect-console/releases?per_page=100";
+const std::string asset_prefix = "https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/";
 [[noreturn]] void fail(const char* message) { throw std::runtime_error(message); }
 void win(bool ok, const char* message) { if (!ok) fail(message); }
 struct Handle {
