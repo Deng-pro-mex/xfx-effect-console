@@ -113,7 +113,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.9";
+constexpr char kProductVersion[] = "1.1.10";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -1548,6 +1548,15 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         }
     }
     if (message == WM_KEYDOWN) {
+        // Ctrl + main-row digit has to be handled HERE: an edit control produces no
+        // WM_CHAR at all for Ctrl+digit (confirmed by apply-trace.log, which shows no
+        // character message for that combination), so any character-stage handling is
+        // dead code. Insert the digit directly instead.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wparam >= '1' && wparam <= '9') {
+            const wchar_t digit[2] = { static_cast<wchar_t>(wparam), L'\0' };
+            SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(digit));
+            return 0;
+        }
         // Favourites slots win when the search box is empty; otherwise the digits
         // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
@@ -2284,6 +2293,9 @@ ULONGLONG g_pending_apply_since = 0;
 // first moments after startup, which is why the error appeared only on the first apply
 // after a restart. Host work is held back for a short settle window.
 ULONGLONG g_first_idle_tick = 0;
+// Number of consecutive idle callbacks where both readiness signals were clear.
+int g_apply_clear_streak = 0;
+constexpr int kRequiredClearStreak = 3;
 constexpr ULONGLONG kStartupSettleMs = 1200;
 
 // Stages an apply for the next idle callback. Returns immediately.
@@ -2318,16 +2330,35 @@ bool run_pending_apply_on_idle() {
     // modal loop (see apply-trace.log), and the window check alone can be fooled by our
     // own hidden palette. Waiting for both to be clear is what actually prevents AE from
     // refusing the call.
+    // Require a few consecutive clear idles before acting: AE briefly reports a usable
+    // scripting state while a modal loop is still unwinding, and acting on that single
+    // sample is what produced the intermittent refusal.
     if (!host_scripting_available() || ae_modal_pending()) {
+        g_apply_clear_streak = 0;
         const ULONGLONG now = GetTickCount64();
         if (!g_pending_apply_since) { g_pending_apply_since = now; return false; }
         // Safety valve: if the host never reports readiness, do not strand the request
         // silently. Run it anyway after a grace period and report whatever happens.
         if (now - g_pending_apply_since < 20000) return false;
     }
+    // Both signals clear on this idle; require a short streak so a transient "ready"
+    // report during modal teardown cannot slip through.
+    if (++g_apply_clear_streak < kRequiredClearStreak) return false;
+    g_apply_clear_streak = 0;
     g_pending_apply_since = 0;
     auto job = std::move(g_pending_applies.front());
     g_pending_applies.pop_front();
+    // Hand keyboard state back before touching the host. AE refuses scripting while it
+    // believes a dialog of its own owns the modal loop; leaving our topmost palette as
+    // the foreground window is exactly the condition that reproduces the failure. This
+    // is released, not closed, so the palette returns afterwards.
+    const HWND console_window = g_state ? g_state->window : nullptr;
+    const bool console_was_visible = console_window && IsWindowVisible(console_window);
+    if (console_was_visible) ShowWindow(console_window, SW_HIDE);
+    if (GetCapture() == console_window || (console_window && IsChild(console_window, GetCapture())))
+        ReleaseCapture();
+    // Give the host a moment to process its own message queue without our window.
+    for (int spin = 0; spin < 3; ++spin) { MSG msg; while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); } Sleep(1); }
     ModalGuard modal;
     struct Presentation {
         HWND window = g_state ? g_state->window : nullptr;
