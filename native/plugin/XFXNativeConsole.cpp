@@ -113,7 +113,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.7";
+constexpr char kProductVersion[] = "1.1.8";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -1509,14 +1509,11 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
     }
     if (message == WM_CHAR && wparam >= 1 && wparam <= 9) {
         // Ctrl + main-row digit arrives as a CONTROL character (Ctrl+3 sends 0x03), never
-        // the character '3'. The modifier may already be released by the time WM_CHAR is
-        // dispatched, so the scan code is used instead of GetKeyState: a control
-        // character whose scan code is a main-row digit is exactly Ctrl+digit.
+        // the character '3'. Insert the literal digit so typing numbers always works.
+        // This deliberately does NOT depend on the result-digit setting: it is a plain
+        // text-input path, so it must behave the same whether the shortcut is on or off.
         const UINT scan = static_cast<UINT>((lparam >> 16) & 0xFF);
-        const bool main_row_digit = scan >= 0x02 && scan <= 0x0A;
-        if (main_row_digit && g_state->settings.result_digit_shortcut &&
-            !g_state->settings_visible && !shortcut_list_mode()) {
-            // Insert the literal digit so the documented escape hatch works.
+        if (scan >= 0x02 && scan <= 0x0A) {
             const wchar_t text[2] = { static_cast<wchar_t>(L'0' + wparam), L'\0' };
             SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
             return 0;
@@ -2243,12 +2240,30 @@ void show_console(bool visible);
 // Asks the host whether scripting may run right now. Cheap, side-effect free, and the
 // only reliable signal: AEGP_ExecuteScript fails (and AE shows its own error dialog)
 // exactly when this returns false.
+// Diagnostic log for the intermittent modal-script failure. Written next to the
+// settings file so a real session can be inspected afterwards instead of guessing.
+void update_trace(const std::string& text) {
+    static std::wstring path;
+    if (path.empty()) {
+        try { path = (settings_path().parent_path() / L"apply-trace.log").wstring(); } catch (...) { return; }
+    }
+    try {
+        std::ofstream out(fs::path(path), std::ios::app | std::ios::binary);
+        out << "[" << GetTickCount64() << "] " << text << "\n";
+    } catch (...) {}
+}
+
 bool host_scripting_available() {
     if (!g_basic) return false;
     try {
         AEGP_SuiteHandler suites(g_basic);
         A_Boolean available = FALSE;
-        if (suites.UtilitySuite6()->AEGP_IsScriptingAvailable(&available) != A_Err_NONE) return true;
+        const A_Err probe_error = suites.UtilitySuite6()->AEGP_IsScriptingAvailable(&available);
+        if (probe_error != A_Err_NONE) {
+            update_trace("probe-error err=" + std::to_string(static_cast<int>(probe_error)));
+            return true;
+        }
+        if (!available) update_trace("probe-unavailable");
         return available != FALSE;
     } catch (...) {
         // Fail open: if the probe itself cannot run, let the normal path try.
@@ -2270,6 +2285,11 @@ std::deque<PendingApply> g_pending_applies;
 // When the oldest staged request started waiting, so a host that never reports
 // readiness cannot stall the queue forever.
 ULONGLONG g_pending_apply_since = 0;
+// First moment the idle hook ran. AE's scripting engine is not fully usable in the very
+// first moments after startup, which is why the error appeared only on the first apply
+// after a restart. Host work is held back for a short settle window.
+ULONGLONG g_first_idle_tick = 0;
+constexpr ULONGLONG kStartupSettleMs = 1200;
 
 // Stages an apply for the next idle callback. Returns immediately.
 void stage_apply(std::string script, std::wstring item_key, bool remember, bool close_console) {
@@ -2295,6 +2315,10 @@ xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback) {
 // context where AE is guaranteed not to be inside a modal loop.
 bool run_pending_apply_on_idle() {
     if (g_pending_applies.empty()) return false;
+    // Hold host work briefly after startup: AE's scripting engine is not ready in the
+    // first moments, and reaching it too early is what produced the modal error on the
+    // first apply of a session.
+    if (g_first_idle_tick && GetTickCount64() - g_first_idle_tick < kStartupSettleMs) return false;
     if (!host_scripting_available()) {
         // Host still busy: keep the request staged and try again on a later idle. The
         // host probe is authoritative; the window-state heuristic is not consulted here
@@ -2378,16 +2402,24 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
             }
             return text;
         };
+        update_trace("execute-begin");
         const A_Err error = suites.UtilitySuite6()->AEGP_ExecuteScript(
             g_plugin_id, script.c_str(), FALSE, &result_handle, &error_handle);
         const std::string result = read_handle(result_handle);
         const std::string script_error = read_handle(error_handle);
+        update_trace("execute-end err=" + std::to_string(static_cast<int>(error)) +
+            " msg=" + script_error.substr(0, 160));
         // AE refuses scripting while its own modal dialog is up. Detect that exact
         // failure and park the script for the next idle callback instead of letting
         // the host error dialog reach the user. Window-state probing alone cannot be
         // trusted (the console may not exist yet on the very first use), so the
         // rejection itself is the authoritative signal.
-        if (error && is_modal_script_rejection(script_error)) {
+        // Retry once on ANY scripting failure during the startup settle window: the host
+        // can reject the first call even when its probe said it was ready, and a single
+        // retry turns that into a brief delay instead of an error dialog.
+        const bool early_session = g_first_idle_tick &&
+            GetTickCount64() - g_first_idle_tick < 15000;
+        if (error && (is_modal_script_rejection(script_error) || early_session)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
             if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
@@ -5154,6 +5186,7 @@ A_Err bridge_idle_hook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleep) {
         } processing;
         refresh_host_theme();
         ensure_hotkey_window();
+        if (!g_first_idle_tick) g_first_idle_tick = GetTickCount64();
         // Staged applies run here, on the AE main thread at a point where no modal
         // loop can be active. This is the single place host work is performed.
         if (run_pending_apply_on_idle()) {
