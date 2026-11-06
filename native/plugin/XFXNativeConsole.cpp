@@ -113,7 +113,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.4";
+constexpr char kProductVersion[] = "1.1.5";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -1226,8 +1226,9 @@ void clear_result_data();
 bool add_tooltip_for_control(HWND parent, HWND tooltip, HWND control, UINT_PTR id, const wchar_t* text);
 
 bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
-    int slot = key >= '1' && key <= '9' ? static_cast<int>(key - '1') :
-        (key >= VK_NUMPAD1 && key <= VK_NUMPAD9 ? static_cast<int>(key - VK_NUMPAD1) : -1);
+    // Main row only: the numeric keypad is reserved for typing numbers and must never
+    // trigger a shortcut, per the documented input policy.
+    const int slot = (key >= '1' && key <= '9') ? static_cast<int>(key - '1') : -1;
     if (slot < 0 || (GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
         (GetKeyState(VK_SHIFT) & 0x8000) || ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) ||
         GetWindowTextLengthW(g_state->search) != 0 ||
@@ -1506,23 +1507,42 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         DrawTextW(dc,cue,-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
         if(saved)RestoreDC(dc,saved);if(message==WM_PAINT)EndPaint(hwnd,&paint);return 0;
     }
-    if (message == WM_CHAR) {
-        // Deterministic digit policy, no leftover state: while the shortcut is on, a
-        // main-row digit is never inserted as text. Ctrl+digit inserts a real digit and
-        // is handled in WM_KEYDOWN, where the modifier state is reliable.
-        const bool plain_digit = wparam >= L'1' && wparam <= L'9';
-        if (plain_digit && g_state->settings.result_digit_shortcut &&
+    if (message == WM_CHAR && wparam >= 1 && wparam <= 9) {
+        // Ctrl + main-row digit arrives as a CONTROL character (Ctrl+3 sends 0x03), never
+        // the character '3'. The modifier may already be released by the time WM_CHAR is
+        // dispatched, so the scan code is used instead of GetKeyState: a control
+        // character whose scan code is a main-row digit is exactly Ctrl+digit.
+        const UINT scan = static_cast<UINT>((lparam >> 16) & 0xFF);
+        const bool main_row_digit = scan >= 0x02 && scan <= 0x0A;
+        if (main_row_digit && g_state->settings.result_digit_shortcut &&
+            !g_state->settings_visible && !shortcut_list_mode()) {
+            // Insert the literal digit so the documented escape hatch works.
+            const wchar_t text[2] = { static_cast<wchar_t>(L'0' + wparam), L'\0' };
+            SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
+            return 0;
+        }
+    }
+    if (message == WM_CHAR && wparam >= L'1' && wparam <= L'9') {
+        // A digit reached the character stage. Whether it may be inserted depends on
+        // WHERE it came from, and the scan code is the only reliable discriminator:
+        //   main row 0x02..0x0A  -> application shortcut only, never text
+        //   keypad   0x47..0x53  -> always plain text, never a shortcut
+        // Earlier attempts used a one-shot flag, which could leak across keystrokes and
+        // is exactly why the behaviour looked intermittent.
+        const UINT scan = static_cast<UINT>((lparam >> 16) & 0xFF);
+        const bool from_main_row = scan >= 0x02 && scan <= 0x0A;
+        const bool from_keypad = scan >= 0x47 && scan <= 0x53;
+        if (from_main_row && g_state->settings.result_digit_shortcut &&
             !(GetKeyState(VK_CONTROL) & 0x8000) &&
-            !g_state->settings_visible && !shortcut_list_mode()) return 0;
+            !g_state->settings_visible && !shortcut_list_mode()) {
+            return 0;   // apply-only: the digit must never be typed
+        }
+        if (from_keypad) {
+            // Explicitly let the edit control receive it; nothing may consume it.
+            return CallWindowProcW(g_search_proc, hwnd, message, wparam, lparam);
+        }
     }
     if (message == WM_KEYDOWN) {
-        // Ctrl + main-row digit: let the default edit control handle it so the digit is
-        // inserted through the normal character path. Returning here with our own
-        // EM_REPLACESEL proved unreliable with IMEs; falling through to the default
-        // proc is what actually types the character.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wparam >= '1' && wparam <= '9') {
-            return DefWindowProcW(hwnd, message, wparam, lparam);
-        }
         // Favourites slots win when the search box is empty; otherwise the digits
         // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
@@ -2149,64 +2169,6 @@ void refresh_catalog() {
     set_status(L"扫描完成",true);
 }
 
-// Scripts that arrived while AE was waiting on a modal dialog. AE rejects
-// AEGP_ExecuteScript in that state, so they are parked here and run from the next
-// idle callback once the dialog is gone. Order is preserved; each entry runs once.
-struct DeferredScript {
-    std::string script;
-    bool show_feedback = false;
-};
-std::deque<DeferredScript> g_deferred_scripts;
-ULONGLONG g_deferred_since = 0;
-
-xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback);
-bool ae_modal_pending();
-bool host_scripting_available();
-
-// Public entry point. When AE is waiting on a modal dialog the script is parked and
-// executed from the next idle callback instead of failing with AE's own error
-// dialog; otherwise it runs immediately as before.
-xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback = true) {
-    // Primary guard: ask AE directly. This runs before any modal-depth bookkeeping, so
-    // the decision cannot be polluted by our own state.
-    if (!host_scripting_available() || ae_modal_pending()) {
-        if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
-        xfx::ScriptReply deferred;
-        deferred.succeeded = false;
-        deferred.pending = true;
-        deferred.message = "AE 正在等待对话框关闭，操作已排队";
-        return deferred;
-    }
-    return run_ae_script_now(script, show_feedback);
-}
-
-// Runs the oldest parked script on the AE main thread. Returns true when one ran.
-bool run_deferred_script_on_idle() {
-    if (g_deferred_scripts.empty()) { g_deferred_since = 0; return false; }
-    if (ae_modal_pending()) {
-        // Still modal: keep waiting, but do not wait forever on a dialog the user
-        // left open. After the timeout the queue is dropped with a visible reason.
-        const ULONGLONG now = GetTickCount64();
-        if (!g_deferred_since) { g_deferred_since = now; return false; }
-        if (now - g_deferred_since < 15000) return false;
-        g_deferred_scripts.clear(); g_deferred_since = 0;
-        set_status(L"操作未执行：AE 对话框长时间未关闭，请关闭后重试");
-        return false;
-    }
-    g_deferred_since = 0;
-    auto job = std::move(g_deferred_scripts.front());
-    g_deferred_scripts.pop_front();
-    const auto reply = run_ae_script_now(job.script, job.show_feedback);
-    // The user pressed the key before the dialog closed, so report the outcome now
-    // that it actually ran; otherwise a deferred apply looks like nothing happened.
-    if (reply.succeeded || reply.count) {
-        set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
-    } else {
-        set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
-    }
-    return true;
-}
-
 // Detects whether AE is currently waiting on a modal dialog. AEGP_ExecuteScript
 // fails outright in that state ("cannot run a script while a modal dialog is
 // waiting"), which surfaced as a spurious error dialog on the first use after every
@@ -2274,10 +2236,13 @@ bool is_modal_script_rejection(const std::string& message) {
     return false;
 }
 
-// Asks the host whether scripting may run right now. Cheap, side-effect free, and
-// the only reliable signal: AEGP_ExecuteScript fails (and AE shows its own error
-// dialog) exactly when this returns false. Called before any state is mutated so a
-// parked request leaves no trace behind.
+xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback);
+xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback = true);
+void show_console(bool visible);
+
+// Asks the host whether scripting may run right now. Cheap, side-effect free, and the
+// only reliable signal: AEGP_ExecuteScript fails (and AE shows its own error dialog)
+// exactly when this returns false.
 bool host_scripting_available() {
     if (!g_basic) return false;
     try {
@@ -2289,6 +2254,96 @@ bool host_scripting_available() {
         // Fail open: if the probe itself cannot run, let the normal path try.
         return true;
     }
+}
+
+// Host-affecting work is staged here and executed from the AEGP idle hook, never from
+// a window message handler. A window message can arrive while AE is inside its own
+// modal loop, and calling AEGP_ExecuteScript from there is exactly what produced the
+// intermittent "cannot run a script while a modal dialog is waiting" error.
+struct PendingApply {
+    std::string script;
+    std::wstring item_key;      // remembered for the recents list; empty for none
+    bool remember = false;
+    bool close_console = true;  // hide the palette while AE renders, as before
+};
+std::deque<PendingApply> g_pending_applies;
+// When the oldest staged request started waiting, so a host that never reports
+// readiness cannot stall the queue forever.
+ULONGLONG g_pending_apply_since = 0;
+
+// Stages an apply for the next idle callback. Returns immediately.
+void stage_apply(std::string script, std::wstring item_key, bool remember, bool close_console) {
+    if (g_pending_applies.size() >= 8) g_pending_applies.pop_front();
+    g_pending_applies.push_back({std::move(script), std::move(item_key), remember, close_console});
+}
+
+// Public entry point for host work. Everything goes through the idle queue so no host
+// call can ever happen inside a window message (which is where AE's modal-script error
+// came from). The direct path is kept only for the idle runner itself.
+xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback) {
+    if (!host_scripting_available()) {
+        stage_apply(script, L"", false, show_feedback);
+        xfx::ScriptReply deferred;
+        deferred.pending = true;
+        deferred.message = "AE 正在等待对话框关闭，操作已排队";
+        return deferred;
+    }
+    return run_ae_script_now(script, show_feedback);
+}
+
+// Executes one staged apply. Only called from the AEGP idle hook, which is the one
+// context where AE is guaranteed not to be inside a modal loop.
+bool run_pending_apply_on_idle() {
+    if (g_pending_applies.empty()) return false;
+    if (!host_scripting_available()) {
+        // Host still busy: keep the request staged and try again on a later idle. The
+        // host probe is authoritative; the window-state heuristic is not consulted here
+        // because a false positive would silently stall every apply.
+        const ULONGLONG now = GetTickCount64();
+        if (!g_pending_apply_since) { g_pending_apply_since = now; return false; }
+        // Safety valve: if the host never reports readiness, do not strand the request
+        // silently. Run it anyway after a grace period and report whatever happens.
+        if (now - g_pending_apply_since < 20000) return false;
+    }
+    g_pending_apply_since = 0;
+    auto job = std::move(g_pending_applies.front());
+    g_pending_applies.pop_front();
+    ModalGuard modal;
+    struct Presentation {
+        HWND window = g_state ? g_state->window : nullptr;
+        bool was_visible = window && IsWindowVisible(window);
+        bool close_console = true;
+        ~Presentation() {
+            if (!g_state) return;
+            g_state->applying_item = false;
+            if (close_console && IsWindow(window)) PostMessageW(window, WM_CLOSE, 0, 0);
+            else if (was_visible && IsWindow(window)) show_console(true);
+        }
+    } presentation;
+    presentation.close_console = job.close_console;
+    if (g_state) g_state->applying_item = true;
+    if (job.close_console && presentation.was_visible) {
+        if (g_state->tooltip) SendMessageW(g_state->tooltip, TTM_POP, 0, 0);
+        ShowWindow(presentation.window, SW_HIDE);
+    }
+    if (g_state) { g_state->ime.restore(); g_state->ime_session_active = false; }
+    const auto reply = run_ae_script_now(job.script, false);
+    if (reply.pending) {
+        // The precheck inside run_ae_script_now parked it again; nothing to report yet.
+        return true;
+    }
+    if ((reply.succeeded || reply.count) && job.remember && !job.item_key.empty() && g_state) {
+        auto& recent = g_state->settings.recent;
+        recent.erase(std::remove(recent.begin(), recent.end(), job.item_key), recent.end());
+        recent.insert(recent.begin(), job.item_key);
+        if (recent.size() > 20) recent.resize(20);
+    }
+    if (reply.succeeded || reply.count) {
+        set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
+    } else {
+        set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
+    }
+    return true;
 }
 
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback = true) {
@@ -2335,7 +2390,7 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         if (error && is_modal_script_rejection(script_error)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
-            if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
+            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
             xfx::ScriptReply deferred;
             deferred.pending = true;
             deferred.message = "AE 正在等待对话框关闭，操作已排队";
@@ -2388,19 +2443,8 @@ struct ApplyPresentation {
 
 void execute_layer_style(size_t index) {
     if (!g_state || index >= xfx::layer_styles.size() || g_state->applying_item) return;
-    ModalGuard modal;
-    ApplyPresentation presentation;
-    const auto reply = run_ae_script(xfx::script_apply_layer_style(xfx::layer_styles[index].match_name), false);
-    if (reply.pending) {
-        set_status(L"AE 正在等待对话框关闭，操作已排队，关闭后自动执行", true);
-        return;
-    }
-    if (reply.succeeded) {
-        set_status(L"图层样式已启用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
-        presentation.finish();
-    } else {
-        set_status((reply.partial ? L"部分完成：" : L"图层样式添加失败：") + utf8_to_wide(reply.message.c_str()));
-    }
+    // Same staging rule as effects: never call the host from a window message.
+    stage_apply(xfx::script_apply_layer_style(xfx::layer_styles[index].match_name), L"", false, true);
 }
 
 xfx::ScriptReply execute_item(const xfx::CatalogItem& selected_item) {
@@ -2412,21 +2456,13 @@ xfx::ScriptReply execute_item(const xfx::CatalogItem& selected_item) {
     const auto script = override != g_state->settings.overrides.end()
         ? xfx::script_apply_preset(override->second) : (item.item_type == L"preset"
         ? xfx::script_apply_preset(item.file_path) : xfx::script_apply_effect(item.match_name));
-    ModalGuard modal;
-    ApplyPresentation presentation;
-    const auto reply = run_ae_script(script, false);
-    if (reply.pending) {
-        set_status(L"AE 正在等待对话框关闭，操作已排队，关闭后自动执行", true);
-        return reply;
-    }
-    if (reply.succeeded || reply.count) remember_recent(item);
-    if (reply.succeeded) {
-        set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
-        presentation.finish();
-    } else {
-        set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
-    }
-    return reply;
+    // Stage the apply for the next idle callback. Running AEGP_ExecuteScript straight
+    // from this window message is what intermittently hit AE's modal-script error.
+    stage_apply(script, item_key(item), true, true);
+    xfx::ScriptReply staged;
+    staged.succeeded = true;
+    staged.message = "已排队应用";
+    return staged;
 }
 
 fs::path capture_directory() {
@@ -5118,14 +5154,11 @@ A_Err bridge_idle_hook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleep) {
         } processing;
         refresh_host_theme();
         ensure_hotkey_window();
-        // Parked scripts (queued while an AE modal dialog was up) run as soon as
-        // the dialog is gone. This is what keeps the first action after an AE
-        // restart from failing with AE's own modal-script error.
-        if (!g_deferred_scripts.empty()) {
-            if (run_deferred_script_on_idle()) {
-                if (max_sleep && *max_sleep > 6) *max_sleep = 6;
-                return A_Err_NONE;
-            }
+        // Staged applies run here, on the AE main thread at a point where no modal
+        // loop can be active. This is the single place host work is performed.
+        if (run_pending_apply_on_idle()) {
+            if (max_sleep && *max_sleep > 6) *max_sleep = 6;
+            return A_Err_NONE;
         }
         tick_updates();
         if (max_sleep && *max_sleep > 6) *max_sleep = 6;
