@@ -10,3 +10,7 @@ installer/*.exe
 installer/*.aex
 vendor/ae-sdk/*
 !vendor/ae-sdk/README.txt
+
+# Release upload staging (never source)
+dist-release/
+

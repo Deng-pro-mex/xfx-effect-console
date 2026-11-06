@@ -1,8 +1,0 @@
-{
-  "tag_name": "effect-console-v1.1.0",
-  "target_commitish": "main",
-  "name": "效果控制台 1.1.0",
-  "body": "## 效果控制台 1.1.0\n\n### 移除\n- 删除参数名中文翻译功能（参数中文对照窗口、词表、离线翻译引擎全部移除）。实测翻译质量不达标且无法做到无感，故移除。\n- 特效名中文翻译保留不变：搜「发光」→ Glow、「gsmh」→ 高斯模糊 照常可用，1401 个特效完整收录。\n\n### 新增：无感自动更新\n- 后台自动检查正式版（首次空闲 + 每 6 小时）\n- 发现新版自动下载并校验 SHA256，无需点击任何按钮\n- 关闭 AE 时自动安装：插件在卸载回调中启动安装器，安装器等待其余 AE 进程退出后替换文件\n- 不自动关闭 AE、不在 AE 运行时替换已加载插件、失败保留旧版本\n- 用户仅需：保存工程 + 通过 Windows UAC 授权\n\n### 安装\n1. 退出所有 After Effects\n2. 运行 EffectConsoleInstaller-1.1.0.exe\n3. 装好后正常使用，后续版本自动更新\n\n### 校验值\n```\nSHA256 (EffectConsoleInstaller-1.1.0.exe) = 61a7b36ea784ff403936e338863f999923b818cab3fa09a02b83090bbeeeaa11\n```",
-  "draft": false,
-  "prerelease": false
-}
