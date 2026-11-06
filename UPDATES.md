@@ -17,7 +17,9 @@
 1. 版本为严格三段数值，例如`1.0.28`，tag推荐`effect-console-v1.0.28`。兼容`effect-console-1.0.28`、`xfx-native-console-v1.0.28`、`v1.0.28`或纯版本。
 2. 同一正式Release必须附带精确名称`EffectConsoleInstaller-1.0.28.exe`，文件版本与源码VERSION相同。草稿与预发布不通知。
 3. 安装包必须有GitHub API返回的`digest: sha256:<64位hex>`，或同一Release附带`SHA256SUMS`/`SHA256SUMS.txt`，行格式为`<SHA256>  EffectConsoleInstaller-1.0.28.exe`。缺校验值、冲突、错版本、错仓库URL均拒绝下载。此为HTTPS仓库信任+完整性检查，不宣称独立发布者数字签名。
-4. 本轮只构建和本机更新，不创建tag、commit、push、PR或Release。下一次明确授权发布后，其他机器才会发现新版。
+4. **每个正式 Release 必须同时附带源码包**，名称为 `EffectConsole-<版本>-source.zip`（例如 `EffectConsole-1.1.0-source.zip`）。该包由 `scripts/package-effect-console-source.py` 生成，内含 `SOURCE-SHA256SUMS.txt` 逐文件校验清单。**缺源码包的 Release 视为未完成发布**，必须补传。
+5. 发布后必须核验：安装器资产存在且版本号匹配、`digest` 与本地一致、**源码包资产存在且 digest 一致**。三项缺一不可。
+6. 本机更新（安装到自己机器）与对外发布是两件事；对外发布需用户明确授权。
 
 ## 快照修复与证据边界
 
