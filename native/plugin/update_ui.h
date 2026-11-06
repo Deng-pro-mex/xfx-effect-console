@@ -90,26 +90,26 @@ void tick_updates() {
         // A rate limit or an offline machine is not an error worth a warning box: it
         // resolves itself and nothing is misconfigured. Report it in the status line
         // and only use a dialog for actionable outcomes.
-        if (info.state == xfx::UpdateInfo::Failed && update_failure_is_transient(info.message)) {
-            set_status(L"暂时无法检查更新（GitHub 限流或网络不可用），稍后会自动重试；这不代表已是最新版本", false);
+        // Every check-update outcome is informational, never a decision the user
+        // must click through, so it belongs in the bottom-left status line of the
+        // console instead of a modal dialog.
+        if (info.state == xfx::UpdateInfo::Failed) {
+            set_status(update_failure_is_transient(info.message)
+                ? L"暂时无法检查更新（GitHub 限流或网络不可用），稍后自动重试；这不代表已是最新"
+                : L"检查更新未完成：" + utf8_to_wide(info.message.c_str()), false);
+        } else if (info.state == xfx::UpdateInfo::Current) {
+            set_status(L"没有发现更高版本的正式效果控制台发行版", true);
         } else {
-            ModalGuard modal;
-            const auto result = info.state == xfx::UpdateInfo::Failed ?
-                L"检查更新未完成：\n" + utf8_to_wide(info.message.c_str()) + L"\n请检查网络后从设置或关于窗口重试；无法联网不代表已经最新。" :
-                info.state == xfx::UpdateInfo::Current ? std::wstring(L"没有发现更高版本的正式效果控制台发行版。") :
-                L"发现正式新版 " + utf8_to_wide(info.version.c_str()) + L"。\n点击面板“更新”按钮查看说明并下载。";
-            MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(), result.c_str(),
-                L"检查更新", MB_OK | (info.state == xfx::UpdateInfo::Failed ? MB_ICONWARNING : MB_ICONINFORMATION));
+            set_status(L"发现正式新版 " + utf8_to_wide(info.version.c_str()) + L"，正在后台下载", true);
         }
     }
     if (g_user_update_active && (info.state == xfx::UpdateInfo::Failed || info.state == xfx::UpdateInfo::Ready)) {
         g_user_update_active = false;
-        ModalGuard modal;
-        const auto text = info.state == xfx::UpdateInfo::Ready ?
-            L"更新安装包已下载并校验。\n点击“安装更新”，按提示保存并退出 AE 后确认安装。\n\n" + info.installer.wstring() :
-            L"更新下载未完成：\n" + utf8_to_wide(info.message.c_str()) + L"\n现有插件未改变，可稍后从设置或关于窗口重新检查。";
-        MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(), text.c_str(),
-            L"效果控制台更新", MB_OK | (info.state == xfx::UpdateInfo::Ready ? MB_ICONINFORMATION : MB_ICONWARNING));
+        // Same rule: download outcomes are status information. Installing stays an
+        // explicit, user-initiated action elsewhere.
+        set_status(info.state == xfx::UpdateInfo::Ready
+            ? L"更新已下载并校验；关闭 AE 后自动安装"
+            : L"更新下载未完成：" + utf8_to_wide(info.message.c_str()) + L"（现有插件未改变）", info.state == xfx::UpdateInfo::Ready);
     }
 #endif
     // Silent path: as soon as a formal release is known, start downloading it.

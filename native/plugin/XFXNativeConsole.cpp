@@ -111,7 +111,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.1";
+constexpr char kProductVersion[] = "1.1.2";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -961,10 +961,21 @@ UINT current_hotkey_modifiers() {
     return modifiers;
 }
 
+// True when keyboard input must reach the focused control instead of the global
+// hotkey. Without this the shortcut swallows the very keys the user is pressing to
+// record a new shortcut, which is why changing the hotkey appeared impossible.
+bool hotkey_capture_active() {
+    if (!g_state) return false;
+    // Only active while the shortcut is being recorded. The search box must NOT count:
+    // the console has to remain reachable by its own shortcut while the user types.
+    return g_state->hotkey_window &&
+        GetPropW(g_state->hotkey_window, L"XFXHotkeyCapture") != nullptr;
+}
+
 LRESULT CALLBACK console_keyboard_hook(int code, WPARAM wparam, LPARAM lparam) {
     if (code >= 0 && wparam == PM_REMOVE && g_state && g_state->modal_depth == 0) {
         auto* message = reinterpret_cast<MSG*>(lparam);
-        if (GetFocus() != g_state->hotkey_edit &&
+        if (!hotkey_capture_active() && GetFocus() != g_state->hotkey_edit &&
             hotkey_event_matches(message->message, static_cast<UINT>(message->wParam),
                                  current_hotkey_modifiers(), g_state->hotkey_spec)) {
             DWORD process = 0;
@@ -986,6 +997,7 @@ LRESULT CALLBACK console_low_level_keyboard_hook(int code, WPARAM wparam, LPARAM
         if (up && event->vkCode == g_state->hotkey_spec.virtual_key) {
             g_state->hotkey_key_down = false;
         } else if (down && g_state->modal_depth == 0 &&
+                   !hotkey_capture_active() &&
                    GetFocus() != g_state->hotkey_edit &&
                    !g_state->hotkey_key_down &&
                    hotkey_event_matches(static_cast<UINT>(wparam), event->vkCode,
@@ -1351,6 +1363,20 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         return 0;
     }
     if (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == WM_ENABLE) {
+        // While this box has focus every key belongs to shortcut recording. The
+        // global hooks honour this flag so pressing the *current* shortcut (for
+        // example Shift+Space) reaches the box instead of firing the console.
+        if (g_state && g_state->hotkey_window &&
+            (message == WM_SETFOCUS || message == WM_KILLFOCUS)) {
+            // RemoveProp (not a stored zero) keeps GetPropW unambiguous for callers.
+            // WM_ENABLE must not clear the flag: the console disables controls while a
+            // busy surface is shown, and that is not a focus change.
+            if (message == WM_SETFOCUS)
+                SetPropW(g_state->hotkey_window, L"XFXHotkeyCapture",
+                         reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
+            else
+                RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
@@ -2106,7 +2132,14 @@ bool run_deferred_script_on_idle() {
     g_deferred_since = 0;
     auto job = std::move(g_deferred_scripts.front());
     g_deferred_scripts.pop_front();
-    run_ae_script_now(job.script, job.show_feedback);
+    const auto reply = run_ae_script_now(job.script, job.show_feedback);
+    // The user pressed the key before the dialog closed, so report the outcome now
+    // that it actually ran; otherwise a deferred apply looks like nothing happened.
+    if (reply.succeeded || reply.count) {
+        set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
+    } else {
+        set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
+    }
     return true;
 }
 
@@ -2162,6 +2195,21 @@ bool ae_modal_pending() {
     return probe.found;
 }
 
+// AE's own wording when a script is refused because a modal dialog is up. Matched
+// case-insensitively on both the English and Simplified Chinese host strings so the
+// check works on either UI language.
+bool is_modal_script_rejection(const std::string& message) {
+    if (message.empty()) return false;
+    std::string lower = message;
+    for (auto& ch : lower) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    for (const char* needle : {
+             "modal dialog", "while a modal", "mode dialog",
+             "\xe6\xa8\xa1\xe6\x80\x81\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86"}) {
+        if (lower.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback = true) {
     ModalGuard modal;
     std::unique_ptr<BusyFeedback> feedback;
@@ -2197,6 +2245,20 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
             g_plugin_id, script.c_str(), FALSE, &result_handle, &error_handle);
         const std::string result = read_handle(result_handle);
         const std::string script_error = read_handle(error_handle);
+        // AE refuses scripting while its own modal dialog is up. Detect that exact
+        // failure and park the script for the next idle callback instead of letting
+        // the host error dialog reach the user. Window-state probing alone cannot be
+        // trusted (the console may not exist yet on the very first use), so the
+        // rejection itself is the authoritative signal.
+        if (error && is_modal_script_rejection(script_error)) {
+            if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
+            if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
+            if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
+            xfx::ScriptReply deferred;
+            deferred.pending = true;
+            deferred.message = "AE 正在等待对话框关闭，操作已排队";
+            return deferred;
+        }
         if (result_handle) { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); result_handle = nullptr; }
         if (error_handle) { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); error_handle = nullptr; }
         reply = xfx::parse_script_reply(result);
