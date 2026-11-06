@@ -29,6 +29,12 @@ constexpr size_t metadata_limit = 2 * 1024 * 1024, sums_limit = 256 * 1024;
 constexpr uint64_t installer_limit = 256ull * 1024 * 1024;
 const std::string api_url = "https://api.github.com/repos/Deng-pro-mex/xfx-effect-console/releases?per_page=100";
 const std::string asset_prefix = "https://github.com/Deng-pro-mex/xfx-effect-console/releases/download/";
+// Unauthenticated github.com endpoints. The REST API allows only 60 requests per hour
+// per IP and that budget is shared by everyone behind the same NAT, so it runs out and
+// the check then fails for no fault of the user. These two endpoints serve the same
+// information without consuming that budget and are the primary path.
+const std::string latest_url = "https://github.com/Deng-pro-mex/xfx-effect-console/releases/latest";
+const std::string tag_prefix = "https://github.com/Deng-pro-mex/xfx-effect-console/releases/tag/";
 [[noreturn]] void fail(const char* message) { throw std::runtime_error(message); }
 void win(bool ok, const char* message) { if (!ok) fail(message); }
 struct Handle {
@@ -153,6 +159,10 @@ Url url(const std::string& input) {
 }
 void allowed_url(const std::string& input, bool api, bool redirected) {
     auto u = url(input);
+    // The web path: either the fixed /releases/latest probe or a tag page derived from
+    // the version we just discovered. Both are fixed strings, never caller supplied.
+    if (input == latest_url) return;
+    if (input.rfind(tag_prefix, 0) == 0 && input.find('/', tag_prefix.size()) == std::string::npos) return;
     if (api) { if (input != api_url || redirected) fail("API redirect refused"); return; }
     if (input.rfind(asset_prefix, 0) == 0) return;
     if (redirected && ((u.host == "release-assets.githubusercontent.com" && u.path.rfind("/github-production-release-asset/", 0) == 0) ||
@@ -239,6 +249,68 @@ std::string sha_text(std::string s) {
     for (auto& c : s) { if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a'); else if (!((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9'))) fail("Invalid SHA256 digest"); } return s;
 }
 struct Candidate { std::string version, notes, url, hash; uint64_t size = 0; };
+
+// Resolves /releases/latest to its tag name via the redirect Location header. No body
+// is read, so this is a single tiny request that costs no API quota.
+std::string latest_release_tag(const std::atomic<bool>& stop) {
+    allowed_url(latest_url, false, false);
+    auto response = open_response(latest_url);
+    if (stop.load()) fail("Update cancelled");
+    const bool redirect = response.status == 301 || response.status == 302 ||
+        response.status == 303 || response.status == 307 || response.status == 308;
+    if (!redirect) {
+        if (response.status == 403 || response.status == 429)
+            fail("GitHub rate limit/access denied; retry later");
+        if (response.status == 404) fail("Repository has no published release yet");
+        fail("Latest release did not redirect");
+    }
+    const std::string location = response.location;
+    if (location.empty()) fail("Latest release redirect has no location");
+    if (location.rfind(tag_prefix, 0) != 0) fail("Latest release redirect is not a tag page");
+    auto tail = location.substr(tag_prefix.size());
+    while (!tail.empty() && tail.back() == '/') tail.pop_back();
+    if (tail.empty() || tail.find('/') != std::string::npos || tail.find('?') != std::string::npos)
+        fail("Malformed release tag in redirect");
+    return tail;
+}
+
+// Primary discovery path: ask github.com for the newest release tag. This costs no API
+// quota, so it keeps working when the REST API is rate limited.
+Candidate choose_from_web(const std::string& current, const std::atomic<bool>& stop) {
+    const auto installed = version(current);
+    // Follow the redirect from /releases/latest to /releases/tag/<tag>. Reading the tag
+    // from the Location header needs no HTML parsing and no API request.
+    const std::string tag = latest_release_tag(stop);
+    auto discovered = tag_version(tag);
+    if (!discovered) fail("Latest release tag is not a product version");
+    if (version(*discovered) <= installed) return {};
+    Candidate result;
+    result.version = *discovered;
+    const std::string expected = "EffectConsoleInstaller-" + result.version + ".exe";
+    const std::string base = asset_prefix + tag + "/";
+    // Size is not published outside the API, so it is bounded by the download limit and
+    // verified against SHA256SUMS after transfer.
+    result.url = base + expected;
+    allowed_url(result.url, false, false);
+    const std::string sums_url = base + "SHA256SUMS.txt";
+    allowed_url(sums_url, false, false);
+    auto body = text_fetch(sums_url, sums_limit, stop);
+    size_t start = 0;
+    while (start < body.size()) {
+        auto end = body.find('\n', start);
+        if (end == std::string::npos) end = body.size();
+        auto line = body.substr(start, end - start);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        start = end + 1;
+        if (line.empty()) continue;
+        if (line.size() < 67 || line[64] != ' ' || (line[65] != ' ' && line[65] != '*')) fail("Malformed SHA256SUMS line");
+        auto h = sha_text(line.substr(0, 64));
+        auto name = line.substr(66);
+        if (name == expected) { if (!result.hash.empty()) fail("Duplicate installer checksum"); result.hash = std::move(h); }
+    }
+    if (result.hash.empty()) fail("Installer checksum missing from SHA256SUMS");
+    return result;
+}
 Candidate choose(const std::string& raw, const std::string& current, const std::atomic<bool>& stop) {
     const auto installed = version(current); auto doc = Parser(raw).parse(); if (doc.kind != Json::Array || doc.array.size() > 100) fail("Expected bounded releases array");
     const Json* best = nullptr; std::string best_version; Version highest = installed;
@@ -405,8 +477,12 @@ std::filesystem::path download(const Candidate& c, const std::filesystem::path& 
     if (file.value == INVALID_HANDLE_VALUE) fail("Cannot create installer temporary file");
     try {
         inspect_file(file.value, false); Hash hash; uint64_t count = 0;
-        fetch(c.url, c.size, [&](const char* data, size_t n) { DWORD written = 0; win(WriteFile(file.value, data, static_cast<DWORD>(n), &written, nullptr) != FALSE && written == n, "Cannot write installer temporary file"); hash.add(data, n); count += n; }, stop);
-        if (count != c.size || hash.finish() != c.hash) fail("Installer SHA256/size verification failed");
+        // size==0 means the release was discovered through the web path, which does not
+        // publish a length. The transfer is then bounded by the installer limit and
+        // accepted only if the SHA256 from SHA256SUMS matches the bytes received.
+        const uint64_t limit = c.size ? c.size : installer_limit;
+        fetch(c.url, limit, [&](const char* data, size_t n) { DWORD written = 0; win(WriteFile(file.value, data, static_cast<DWORD>(n), &written, nullptr) != FALSE && written == n, "Cannot write installer temporary file"); hash.add(data, n); count += n; }, stop);
+        if ((c.size && count != c.size) || hash.finish() != c.hash) fail("Installer SHA256/size verification failed");
         win(FlushFileBuffers(file.value) != FALSE, "Cannot flush verified installer");
         if (stop.load()) fail("Update cancelled");
         auto destination = target.filename().wstring(); size_t bytes = destination.size() * sizeof(wchar_t);
@@ -456,8 +532,30 @@ struct UpdateClient::Impl {
                     std::lock_guard guard(mutex); info.installer = std::move(path); info.state = UpdateInfo::Ready; info.message = "Installer verified; ready for explicit user action"; busy = false;
                 } else {
                     (void)update_detail::version(current);
-                    auto body = update_detail::text_fetch(update_detail::api_url, update_detail::metadata_limit, stopping, true);
-                    auto found = update_detail::choose(body, current, stopping);
+                    // Web path first: it needs no API quota, so it still works when the
+                    // shared per-IP REST budget is exhausted. Only if the repository
+                    // serves no redirect at all do we fall back to the REST API.
+                    update_detail::Candidate found;
+                    bool web_ok = false;
+                    std::string web_failure;
+                    try {
+                        found = update_detail::choose_from_web(current, stopping);
+                        web_ok = true;
+                    } catch (const std::exception& error) {
+                        web_failure = error.what();
+                    }
+                    if (!web_ok) {
+                        // The web path could not answer (no release, blocked host, bad
+                        // checksum file). Try the REST API as a second opinion; if that
+                        // fails too, surface the more specific web failure.
+                        try {
+                            auto body = update_detail::text_fetch(update_detail::api_url,
+                                update_detail::metadata_limit, stopping, true);
+                            found = update_detail::choose(body, current, stopping);
+                        } catch (...) {
+                            update_detail::fail(web_failure.empty() ? "Update check failed" : web_failure.c_str());
+                        }
+                    }
                     std::lock_guard guard(mutex); candidate = std::move(found); info.version = candidate.version; info.notes = candidate.notes;
                     info.state = candidate.version.empty() ? UpdateInfo::Current : UpdateInfo::Available;
                     info.message = candidate.version.empty() ? "No newer official Effect Console release" : "Official update available"; busy = false;
