@@ -180,14 +180,10 @@ xfx::BridgeCompletion perform_update(bool check_only) {
         return {true, 0, "", "正在检查更新（60秒内复用最近结果）…"};
     }
     if (info.state == xfx::UpdateInfo::Available) {
-        const auto text = L"当前版本：" + utf8_to_wide(kProductVersion) + L"\n正式新版：" + utf8_to_wide(info.version.c_str()) +
-            L"\n\n" + utf8_to_wide(info.notes.substr(0, 1800).c_str()) +
-            L"\n\n现在下载并校验安装包？下载不影响当前 AE，安装仍需自行保存退出。";
-        if (MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(), text.c_str(),
-            L"效果控制台更新", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
-            return {false, 0, "cancelled", "已取消下载更新"};
+        // Downloading is safe and reversible, so it starts on its own without asking.
+        // Only the installer launch below requires an explicit answer.
         g_update_client->download(); g_user_update_active = true; refresh_update_ui();
-        return {true, 0, "", "正在后台下载并校验更新…"};
+        return {true, 0, "", "已开始后台下载新版 " + info.version + "，下载不影响当前 AE"};
     }
     if (info.state == xfx::UpdateInfo::Ready) {
         if (MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(),

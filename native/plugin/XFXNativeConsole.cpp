@@ -111,7 +111,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.2";
+constexpr char kProductVersion[] = "1.1.3";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -1241,23 +1241,33 @@ bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
 // Returns true when the key was consumed.
 bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     if (!g_state || !g_state->settings.result_digit_shortcut) return false;
-    // Only the main-row digits 1-9. The numeric keypad (VK_NUMPAD1..9) is skipped on
-    // purpose: those keys stay plain digits so typing numbers is never ambiguous.
+    // Only the main-row digits 1-9. The numeric keypad is deliberately excluded so
+    // it always types plain numbers.
     if (key < '1' || key > '9') return false;
+    // Ctrl + digit stays available for the favourites-slot bindings, and Alt/Win are
+    // left to the system.
     if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
-        (GetKeyState(VK_SHIFT) & 0x8000) ||
         ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000)) return false;
-    // The favourites strip and the settings page own their digits.
+    // The favourites strip owns the digits when the query is empty, and the settings
+    // page must keep its digits for text fields.
     if (shortcut_list_mode() || g_state->settings_visible) return false;
-    // While the search box has focus the user is still composing a query, so a digit
-    // belongs to that query ("3D", "1080"). The shortcut therefore applies only when
-    // the results list itself has focus, which is the documented "search result"
-    // surface and keeps typing completely unobstructed.
-    if (in_search) return false;
     const int row = static_cast<int>(key - '1');
     const LRESULT count = SendMessageW(g_state->results, LB_GETCOUNT, 0, 0);
-    if (count == LB_ERR || row >= static_cast<int>(count)) return false;
+    if (count == LB_ERR || row >= static_cast<int>(count)) {
+        // No such result: consume the key anyway so the number never leaks into the
+        // search box, and tell the user why nothing happened.
+        if (in_search) {
+            set_status(L"搜索结果不足 " + std::to_wstring(row + 1) + L" 条；数字键只用于应用结果，"
+                       L"要输入数字请用小键盘或 Ctrl+数字");
+            return true;
+        }
+        return false;
+    }
     if (flags & (1L << 30)) return true; // auto-repeat: consume, apply once
+    if (in_search) {
+        // Swallow the character message that would otherwise insert the digit.
+        g_state->suppressed_search_character = static_cast<wchar_t>(key);
+    }
     SendMessageW(g_state->results, LB_SETCURSEL, static_cast<WPARAM>(row), 0);
     execute_selected();
     return true;
@@ -1366,6 +1376,11 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // While this box has focus every key belongs to shortcut recording. The
         // global hooks honour this flag so pressing the *current* shortcut (for
         // example Shift+Space) reaches the box instead of firing the console.
+        if (message == WM_SETFOCUS) {
+            // Immediate feedback the moment the box is clicked, so the user knows the
+            // plugin is listening instead of guessing whether the click registered.
+            set_status(L"正在录制快捷键：请按下组合键（如 Ctrl+Alt+Space），Esc 取消");
+        }
         if (g_state && g_state->hotkey_window &&
             (message == WM_SETFOCUS || message == WM_KILLFOCUS)) {
             // RemoveProp (not a stored zero) keeps GetPropW unambiguous for callers.
@@ -1383,9 +1398,23 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
     if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
         const UINT key = static_cast<UINT>(wparam);
+        if (key == VK_ESCAPE) {
+            // Cancel leaves the stored shortcut untouched.
+            SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
+            set_status(L"已取消录制，快捷键未修改", true);
+            SetFocus(g_state->search);
+            return 0;
+        }
         if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU ||
             key == VK_LWIN || key == VK_RWIN) {
-            set_status(L"继续按一个字母、数字或功能键");
+            // Live feedback while modifiers are held so the press is visible.
+            std::wstring held;
+            if (GetKeyState(VK_CONTROL) & 0x8000) held += L"Ctrl+";
+            if (GetKeyState(VK_MENU) & 0x8000) held += L"Alt+";
+            if (GetKeyState(VK_SHIFT) & 0x8000) held += L"Shift+";
+            if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) held += L"Win+";
+            set_status(held.empty() ? L"正在录制快捷键：按住修饰键再按一个键"
+                                    : L"正在录制：" + held + L"…再按一个键");
             return 0;
         }
 
@@ -1397,15 +1426,16 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             spec.modifiers |= MOD_WIN;
         }
         if (spec.modifiers == 0) {
-            set_status(L"请按组合键，例如 Ctrl+K 或 Ctrl+Space");
+            set_status(L"请按住 Ctrl / Alt / Shift / Win 之一再按一个键，例如 Ctrl+Alt+Space");
             return 0;
         }
         spec.virtual_key = key;
         const std::wstring text = xfx::format_hotkey(spec);
-        if (!text.empty()) {
-            SetWindowTextW(hwnd, text.c_str());
-            save_hotkey();
-        }
+        if (text.empty()) { set_status(L"这个按键无法作为快捷键，请换一个"); return 0; }
+        SetWindowTextW(hwnd, text.c_str());
+        // save_hotkey reports the concrete outcome (registered, or rejected because
+        // another program already owns the combination).
+        save_hotkey();
         return 0;
     }
     if (message == WM_CHAR || message == WM_SYSCHAR || message == WM_KEYUP || message == WM_SYSKEYUP) return 0;
@@ -2224,6 +2254,19 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
     AEGP_MemHandle result_handle = nullptr, error_handle = nullptr;
     try {
         AEGP_SuiteHandler suites(g_basic);
+        // Ask the host first. AEGP_IsScriptingAvailable is the documented way to know
+        // whether a script may run right now; it is false exactly while AE is waiting
+        // on a modal dialog. Checking up front is what stops the modal error dialog:
+        // once AEGP_ExecuteScript fails, AE has already shown it.
+        A_Boolean scripting_available = TRUE;
+        if (suites.UtilitySuite6()->AEGP_IsScriptingAvailable(&scripting_available) == A_Err_NONE &&
+            !scripting_available) {
+            if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
+            xfx::ScriptReply deferred;
+            deferred.pending = true;
+            deferred.message = "AE 正在等待对话框关闭，操作已排队";
+            return deferred;
+        }
         const auto read_handle = [&](AEGP_MemHandle handle) {
             std::string text;
             if (!handle) return text;
@@ -3268,7 +3311,12 @@ void save_hotkey() {
     if (!register_configured_hotkey()) {
         g_state->settings.hotkey = previous;
         SetWindowTextW(g_state->hotkey_edit, previous.c_str());
-        set_status(L"快捷键格式错误或无法注册，请重试");
+        // Distinguish "bad text" from "someone else owns this combination": the second
+        // case is the common one (IME and other apps reserve Shift+Space etc.).
+        xfx::HotkeySpec probe;
+        set_status(xfx::parse_hotkey(hotkey, &probe)
+            ? std::wstring(L"该快捷键已被其它程序占用，未生效；请换一个组合（原快捷键保持不变）")
+            : std::wstring(L"快捷键格式不正确，未生效；请按住 Ctrl/Alt/Shift 再按一个键"));
         return;
     }
     g_state->settings.hotkey = hotkey;
@@ -4271,6 +4319,29 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 primary_text = item_display_label(*item);
                 // Favorite state is drawn as a vector in the action cell below.
             }
+            // Show the number key that applies this row. Only rows 1-9 are reachable,
+            // and only while the digit shortcut is on, so the label never promises a
+            // key that would do nothing.
+            const int digit_badge = (g_state->settings.result_digit_shortcut && !shortcut_mode &&
+                draw->itemID < 9) ? static_cast<int>(draw->itemID) + 1 : 0;
+            if (digit_badge > 0) {
+                RECT key_box = draw->rcItem;
+                key_box.left += px(34);
+                key_box.right = key_box.left + px(13);
+                key_box.top += px(4);
+                key_box.bottom -= px(4);
+                xfx::paint_round_rect(draw->hDC, key_box,
+                    selected ? colors().selected_text : colors().surface,
+                    static_cast<float>(ui_px(2)), std::nullopt);
+                const auto previous = SelectObject(draw->hDC,
+                    g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+                SetTextColor(draw->hDC, selected ? colors().selected : colors().quiet);
+                DrawTextW(draw->hDC, std::to_wstring(digit_badge).c_str(), -1, &key_box,
+                    DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                SelectObject(draw->hDC, previous);
+                SetTextColor(draw->hDC, selected ? colors().selected_text : colors().text);
+                primary.left += px(15);
+            }
             const int slot = draw->itemID < g_state->visible_slot_numbers.size()
                 ? g_state->visible_slot_numbers[draw->itemID] : -1;
             if (slot >= 0 && slot < 9) {
@@ -4385,12 +4456,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
         if (LOWORD(wparam) == kUpdateId) {
+            // Update outcomes are informational: report them in the bottom-left status
+            // line instead of a modal dialog the user has to dismiss.
             const auto result = perform_update();
             set_status(utf8_to_wide(result.message.c_str()), result.succeeded);
-            if (!result.succeeded && result.code != "cancelled") {
-                ModalGuard modal;
-                MessageBoxW(hwnd, utf8_to_wide(result.message.c_str()).c_str(), L"更新未完成", MB_OK | MB_ICONWARNING);
-            }
             return 0;
         }
         if (LOWORD(wparam) == kResultDigitId && HIWORD(wparam) == BN_CLICKED) {
