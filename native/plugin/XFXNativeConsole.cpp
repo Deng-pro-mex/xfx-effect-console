@@ -113,7 +113,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.8";
+constexpr char kProductVersion[] = "1.1.9";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -1096,6 +1096,8 @@ bool ensure_hotkey_window() {
     return register_configured_hotkey();
 }
 
+void update_trace(const std::string& text);
+
 void set_status(const std::wstring& message, bool success = false) {
     if (g_state && g_state->status) {
         SetWindowTextW(g_state->status, message.c_str());
@@ -1506,6 +1508,12 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             wcscpy_s(cue,L"输入中文、拼音、英文或 matchName");
         DrawTextW(dc,cue,-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
         if(saved)RestoreDC(dc,saved);if(message==WM_PAINT)EndPaint(hwnd,&paint);return 0;
+    }
+    if (message == WM_CHAR) {
+        wchar_t dbg[96]{};
+        swprintf_s(dbg, L"wmchar wparam=%u scan=0x%X ctrl=%d", static_cast<unsigned>(wparam),
+            static_cast<unsigned>((lparam >> 16) & 0xFF), (GetKeyState(VK_CONTROL) & 0x8000) ? 1 : 0);
+        update_trace(wide_to_utf8(dbg));
     }
     if (message == WM_CHAR && wparam >= 1 && wparam <= 9) {
         // Ctrl + main-row digit arrives as a CONTROL character (Ctrl+3 sends 0x03), never
@@ -2174,48 +2182,35 @@ void refresh_catalog() {
 //   * AE's main window is disabled while some popup it owns is up.
 // Returns false when AE is genuinely idle, so normal scripting is unaffected.
 bool ae_modal_pending() {
-    DWORD ae_thread = 0;
-    if (g_state && IsWindow(g_state->window)) {
-        ae_thread = GetWindowThreadProcessId(g_state->window, nullptr);
-    }
-    // A dialog on this thread makes it modal for us; GetActiveWindow reports it.
-    if (ae_thread && ae_thread == GetCurrentThreadId()) {
-        const HWND active = GetActiveWindow();
-        if (active && active != (g_state ? g_state->window : nullptr) &&
-            (GetWindowLongPtrW(active, GWL_STYLE) & WS_CHILD) == 0) {
-            // A top-level window other than the console owns focus while we are
-            // executing: treat it as modal only when it disables its owner.
-            const HWND owner = GetWindow(active, GW_OWNER);
-            if (owner && !IsWindowEnabled(owner)) return true;
-        }
-    }
-    // Thread-modal dialogs disable every other top-level window of the process.
-    const HWND foreground = GetForegroundWindow();
-    if (foreground) {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(foreground, &pid);
-        if (pid == GetCurrentProcessId()) {
-            const LONG_PTR style = GetWindowLongPtrW(foreground, GWL_STYLE);
-            if ((style & WS_CHILD) == 0 && (style & WS_DISABLED) != 0) return true;
-            const LONG_PTR ex = GetWindowLongPtrW(foreground, GWL_EXSTYLE);
-            if ((ex & WS_EX_DLGMODALFRAME) != 0 && !IsWindowEnabled(foreground)) return true;
-        }
-    }
-    // Any enabled=false owner of a visible dialog in this process is the definitive
-    // signal that a modal loop is running.
-    struct Probe { DWORD pid; bool found; } probe{GetCurrentProcessId(), false};
+    // AE runs every modal dialog on its main UI thread and DISABLES its main window
+    // while that loop is active. That disabled state is the one signal the host itself
+    // maintains, so it is used as the authority here. AEGP_IsScriptingAvailable is not
+    // trustworthy for this: it reports "available" even while a modal loop is running
+    // (confirmed by apply-trace.log, which recorded success status with an error text).
+    struct Probe {
+        DWORD pid;
+        HWND console;
+        bool disabled_top_level = false;
+        bool disabled_owner = false;
+    } probe{GetCurrentProcessId(), g_state ? g_state->window : nullptr, false, false};
     EnumWindows([](HWND window, LPARAM raw) -> BOOL {
         auto* state = reinterpret_cast<Probe*>(raw);
-        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(window, &pid);
         if (pid != state->pid) return TRUE;
         if (!IsWindowVisible(window)) return TRUE;
+        const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+        if ((style & WS_CHILD) != 0) return TRUE;
+        if (window == state->console) return TRUE;
+        // Any disabled visible top-level window of this process means a modal loop owns
+        // the thread; AE does exactly this to its main window.
+        if (!IsWindowEnabled(window)) state->disabled_top_level = true;
         const HWND owner = GetWindow(window, GW_OWNER);
-        if (owner && !IsWindowEnabled(owner) && IsWindowVisible(owner)) {
-            state->found = true; return FALSE;
-        }
+        if (owner && owner != state->console && !IsWindowEnabled(owner) && IsWindowVisible(owner))
+            state->disabled_owner = true;
         return TRUE;
     }, reinterpret_cast<LPARAM>(&probe));
-    return probe.found;
+    return probe.disabled_top_level || probe.disabled_owner;
 }
 
 // AE's own wording when a script is refused because a modal dialog is up. Matched
@@ -2301,7 +2296,7 @@ void stage_apply(std::string script, std::wstring item_key, bool remember, bool 
 // call can ever happen inside a window message (which is where AE's modal-script error
 // came from). The direct path is kept only for the idle runner itself.
 xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback) {
-    if (!host_scripting_available()) {
+    if (!host_scripting_available() || ae_modal_pending()) {
         stage_apply(script, L"", false, show_feedback);
         xfx::ScriptReply deferred;
         deferred.pending = true;
@@ -2319,10 +2314,11 @@ bool run_pending_apply_on_idle() {
     // first moments, and reaching it too early is what produced the modal error on the
     // first apply of a session.
     if (g_first_idle_tick && GetTickCount64() - g_first_idle_tick < kStartupSettleMs) return false;
-    if (!host_scripting_available()) {
-        // Host still busy: keep the request staged and try again on a later idle. The
-        // host probe is authoritative; the window-state heuristic is not consulted here
-        // because a false positive would silently stall every apply.
+    // Both signals are required: the host probe alone reported "available" during a real
+    // modal loop (see apply-trace.log), and the window check alone can be fooled by our
+    // own hidden palette. Waiting for both to be clear is what actually prevents AE from
+    // refusing the call.
+    if (!host_scripting_available() || ae_modal_pending()) {
         const ULONGLONG now = GetTickCount64();
         if (!g_pending_apply_since) { g_pending_apply_since = now; return false; }
         // Safety valve: if the host never reports readiness, do not strand the request
@@ -2419,7 +2415,12 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         // retry turns that into a brief delay instead of an error dialog.
         const bool early_session = g_first_idle_tick &&
             GetTickCount64() - g_first_idle_tick < 15000;
-        if (error && (is_modal_script_rejection(script_error) || early_session)) {
+        // The host reports this failure with a SUCCESS status and only the text says
+        // what happened, so the status code alone can never detect it. Check the text
+        // first; that is the only signal that ever fires for this case.
+        const bool modal_text = is_modal_script_rejection(script_error) ||
+            is_modal_script_rejection(result);
+        if (modal_text || (error && early_session)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
             if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
