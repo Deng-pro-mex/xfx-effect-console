@@ -17,6 +17,10 @@ struct Settings {
     bool light_theme = false;
     ThemeMode theme_mode = ThemeMode::Follow;
     bool full_resolution_screenshots = true;
+    // Number keys 1-9 apply the Nth visible search result while the console has
+    // results on screen. Off by default for users who want digits to type normally;
+    // the numeric keypad is always excluded from this shortcut.
+    bool result_digit_shortcut = true;
     // Empty retains the existing product Capture directory for upgrades.
     std::wstring capture_directory;
     std::wstring hotkey = L"Ctrl+Space";

@@ -12,6 +12,10 @@ struct ScriptReply {
     bool partial = false;
     unsigned int count = 0;
     std::string message;
+    // True when AE was waiting on a modal dialog and the request was parked to run
+    // from the next idle callback. Nothing was executed and nothing failed. Kept
+    // last so existing four-value aggregate initializations keep their meaning.
+    bool pending = false;
 };
 ScriptReply parse_script_reply(const std::string& text);
 bool should_close_console(bool auto_close, bool fixed, unsigned int modal_depth);

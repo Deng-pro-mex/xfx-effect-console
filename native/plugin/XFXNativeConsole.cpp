@@ -81,6 +81,8 @@ constexpr int kRefreshId = 1005;
 constexpr int kHotkeyEditId = 1006;
 constexpr int kHotkeySaveId = 1007;
 constexpr int kModeId = 1008;
+// Results-view digit shortcut switch (applies the Nth visible search result).
+constexpr int kResultDigitId = 1041;
 constexpr int kStatusId = 1009;
 constexpr int kCountId = 1010;
 constexpr int kTitleId = 1011;
@@ -109,10 +111,11 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.0";
+constexpr char kProductVersion[] = "1.1.1";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
-constexpr int kSettingsHeight = 132;
+// Room for the results digit-shortcut row added above the update entry.
+constexpr int kSettingsHeight = 162;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -607,6 +610,7 @@ struct PluginState {
     HWND hotkey_edit = nullptr;
     HWND hotkey_save = nullptr;
     HWND mode_checkbox = nullptr;
+    HWND result_digit_checkbox = nullptr;
     HWND status = nullptr;
     HWND update_button = nullptr;
     bool update_available = false;
@@ -1218,6 +1222,35 @@ bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     return true;
 }
 
+// Applies the Nth visible search result with the number keys 1-9.
+// Deliberately ignores the numeric keypad (VK_NUMPAD1..9): those keys are for typing
+// numbers into the search box, and applying an effect on a stray keypad press is not
+// what the user meant. Modifier keys also disqualify the press.
+// Returns true when the key was consumed.
+bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
+    if (!g_state || !g_state->settings.result_digit_shortcut) return false;
+    // Only the main-row digits 1-9. The numeric keypad (VK_NUMPAD1..9) is skipped on
+    // purpose: those keys stay plain digits so typing numbers is never ambiguous.
+    if (key < '1' || key > '9') return false;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
+        (GetKeyState(VK_SHIFT) & 0x8000) ||
+        ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000)) return false;
+    // The favourites strip and the settings page own their digits.
+    if (shortcut_list_mode() || g_state->settings_visible) return false;
+    // While the search box has focus the user is still composing a query, so a digit
+    // belongs to that query ("3D", "1080"). The shortcut therefore applies only when
+    // the results list itself has focus, which is the documented "search result"
+    // surface and keeps typing completely unobstructed.
+    if (in_search) return false;
+    const int row = static_cast<int>(key - '1');
+    const LRESULT count = SendMessageW(g_state->results, LB_GETCOUNT, 0, 0);
+    if (count == LB_ERR || row >= static_cast<int>(count)) return false;
+    if (flags & (1L << 30)) return true; // auto-repeat: consume, apply once
+    SendMessageW(g_state->results, LB_SETCURSEL, static_cast<WPARAM>(row), 0);
+    execute_selected();
+    return true;
+}
+
 template<typename Callback> LRESULT guarded_callback(Callback action) {
     try { return action(); }
     catch (...) { set_status(L"操作未保存，请检查文档目录的写入权限"); return 0; }
@@ -1403,7 +1436,10 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         if (suppress) return 0;
     }
     if (message == WM_KEYDOWN) {
+        // Favourites slots win when the search box is empty; otherwise the digits
+        // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
+        if (try_result_digit_shortcut(wparam, lparam, true)) return 0;
         if (wparam == VK_RETURN) {
             execute_selected();
             return 0;
@@ -1658,6 +1694,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     if (message == WM_KEYDOWN) {
         if (try_digit_shortcut(wparam, lparam, false)) return 0;
+        if (try_result_digit_shortcut(wparam, lparam, false)) return 0;
         const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (wparam == VK_RETURN) {
@@ -2025,7 +2062,107 @@ void refresh_catalog() {
     set_status(L"扫描完成",true);
 }
 
+// Scripts that arrived while AE was waiting on a modal dialog. AE rejects
+// AEGP_ExecuteScript in that state, so they are parked here and run from the next
+// idle callback once the dialog is gone. Order is preserved; each entry runs once.
+struct DeferredScript {
+    std::string script;
+    bool show_feedback = false;
+};
+std::deque<DeferredScript> g_deferred_scripts;
+ULONGLONG g_deferred_since = 0;
+
+xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback);
+bool ae_modal_pending();
+
+// Public entry point. When AE is waiting on a modal dialog the script is parked and
+// executed from the next idle callback instead of failing with AE's own error
+// dialog; otherwise it runs immediately as before.
 xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback = true) {
+    if (ae_modal_pending()) {
+        if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
+        xfx::ScriptReply deferred;
+        deferred.succeeded = false;
+        deferred.pending = true;
+        deferred.message = "AE 正在等待对话框关闭，操作已排队";
+        return deferred;
+    }
+    return run_ae_script_now(script, show_feedback);
+}
+
+// Runs the oldest parked script on the AE main thread. Returns true when one ran.
+bool run_deferred_script_on_idle() {
+    if (g_deferred_scripts.empty()) { g_deferred_since = 0; return false; }
+    if (ae_modal_pending()) {
+        // Still modal: keep waiting, but do not wait forever on a dialog the user
+        // left open. After the timeout the queue is dropped with a visible reason.
+        const ULONGLONG now = GetTickCount64();
+        if (!g_deferred_since) { g_deferred_since = now; return false; }
+        if (now - g_deferred_since < 15000) return false;
+        g_deferred_scripts.clear(); g_deferred_since = 0;
+        set_status(L"操作未执行：AE 对话框长时间未关闭，请关闭后重试");
+        return false;
+    }
+    g_deferred_since = 0;
+    auto job = std::move(g_deferred_scripts.front());
+    g_deferred_scripts.pop_front();
+    run_ae_script_now(job.script, job.show_feedback);
+    return true;
+}
+
+// Detects whether AE is currently waiting on a modal dialog. AEGP_ExecuteScript
+// fails outright in that state ("cannot run a script while a modal dialog is
+// waiting"), which surfaced as a spurious error dialog on the first use after every
+// AE restart. Detection is by window state, not by our own depth counter:
+//   * a thread-modal dialog belongs to the AE UI thread and disables its owner, or
+//   * AE's main window is disabled while some popup it owns is up.
+// Returns false when AE is genuinely idle, so normal scripting is unaffected.
+bool ae_modal_pending() {
+    DWORD ae_thread = 0;
+    if (g_state && IsWindow(g_state->window)) {
+        ae_thread = GetWindowThreadProcessId(g_state->window, nullptr);
+    }
+    // A dialog on this thread makes it modal for us; GetActiveWindow reports it.
+    if (ae_thread && ae_thread == GetCurrentThreadId()) {
+        const HWND active = GetActiveWindow();
+        if (active && active != (g_state ? g_state->window : nullptr) &&
+            (GetWindowLongPtrW(active, GWL_STYLE) & WS_CHILD) == 0) {
+            // A top-level window other than the console owns focus while we are
+            // executing: treat it as modal only when it disables its owner.
+            const HWND owner = GetWindow(active, GW_OWNER);
+            if (owner && !IsWindowEnabled(owner)) return true;
+        }
+    }
+    // Thread-modal dialogs disable every other top-level window of the process.
+    const HWND foreground = GetForegroundWindow();
+    if (foreground) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(foreground, &pid);
+        if (pid == GetCurrentProcessId()) {
+            const LONG_PTR style = GetWindowLongPtrW(foreground, GWL_STYLE);
+            if ((style & WS_CHILD) == 0 && (style & WS_DISABLED) != 0) return true;
+            const LONG_PTR ex = GetWindowLongPtrW(foreground, GWL_EXSTYLE);
+            if ((ex & WS_EX_DLGMODALFRAME) != 0 && !IsWindowEnabled(foreground)) return true;
+        }
+    }
+    // Any enabled=false owner of a visible dialog in this process is the definitive
+    // signal that a modal loop is running.
+    struct Probe { DWORD pid; bool found; } probe{GetCurrentProcessId(), false};
+    EnumWindows([](HWND window, LPARAM raw) -> BOOL {
+        auto* state = reinterpret_cast<Probe*>(raw);
+        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+        if (pid != state->pid) return TRUE;
+        if (!IsWindowVisible(window)) return TRUE;
+        const HWND owner = GetWindow(window, GW_OWNER);
+        if (owner && !IsWindowEnabled(owner) && IsWindowVisible(owner)) {
+            state->found = true; return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&probe));
+    return probe.found;
+}
+
+xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback = true) {
     ModalGuard modal;
     std::unique_ptr<BusyFeedback> feedback;
     if (show_feedback) feedback = std::make_unique<BusyFeedback>(L"正在处理 AE 操作…");
@@ -2110,6 +2247,10 @@ void execute_layer_style(size_t index) {
     ModalGuard modal;
     ApplyPresentation presentation;
     const auto reply = run_ae_script(xfx::script_apply_layer_style(xfx::layer_styles[index].match_name), false);
+    if (reply.pending) {
+        set_status(L"AE 正在等待对话框关闭，操作已排队，关闭后自动执行", true);
+        return;
+    }
     if (reply.succeeded) {
         set_status(L"图层样式已启用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
         presentation.finish();
@@ -2130,6 +2271,10 @@ xfx::ScriptReply execute_item(const xfx::CatalogItem& selected_item) {
     ModalGuard modal;
     ApplyPresentation presentation;
     const auto reply = run_ae_script(script, false);
+    if (reply.pending) {
+        set_status(L"AE 正在等待对话框关闭，操作已排队，关闭后自动执行", true);
+        return reply;
+    }
     if (reply.succeeded || reply.count) remember_recent(item);
     if (reply.succeeded) {
         set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
@@ -2883,6 +3028,8 @@ void apply_imported_settings(const xfx::Settings& imported) {
     SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
     SendMessageW(g_state->mode_checkbox, BM_SETCHECK,
                  g_state->settings.use_english_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
+                 g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
     const bool hotkey_ok = register_configured_hotkey();
     SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
@@ -3432,7 +3579,11 @@ void layout_controls(HWND hwnd) {
     const int theme_y = narrow ? 106 : 74;
     setting(g_state->mode_checkbox,8,theme_y,narrow?inner:inner-144,24);
     setting(g_state->light_theme,width-136,theme_y+(narrow?30:-2),128,28,24);
-    const int update_y = narrow ? 136 : 106;
+    // Results digit-shortcut switch: same row as the update button on wide layouts,
+    // and its own row on narrow ones so nothing overlaps.
+    const int digit_y = narrow ? 164 : 106;
+    setting(g_state->result_digit_checkbox, narrow ? 8 : 200, digit_y, narrow ? inner : inner - 200, 24);
+    const int update_y = narrow ? 196 : 106;
     const bool update_in_settings = g_state->settings_extent >= update_y + 26;
     const bool update_in_footer = g_state->update_available && !update_in_settings;
     if (update_in_settings) {
@@ -3841,9 +3992,13 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         for(HWND combo : {g_state->filter,g_state->light_theme}) {
             SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,GetDpiForWindow(hwnd),96));
         }
-        for (HWND checkbox : {g_state->mode_checkbox})
+        create_control(hwnd, &g_state->result_digit_checkbox, L"BUTTON",
+                       L"数字键 1-9 直接应用搜索结果（小键盘除外）",
+                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kResultDigitId);
+        for (HWND checkbox : {g_state->mode_checkbox, g_state->result_digit_checkbox})
             SetWindowTheme(checkbox, L"", L"");
         SetWindowSubclass(g_state->mode_checkbox,checkbox_face_proc,0xB007,0);
+        SetWindowSubclass(g_state->result_digit_checkbox,checkbox_face_proc,0xB008,0);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
                        WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_CENTERIMAGE | SS_ENDELLIPSIS, kStatusId);
@@ -3860,6 +4015,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
         SendMessageW(g_state->mode_checkbox, BM_SETCHECK,
                      g_state->settings.use_english_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
+                     g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
         repaint_theme_windows();
         g_search_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
@@ -4172,6 +4329,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 ModalGuard modal;
                 MessageBoxW(hwnd, utf8_to_wide(result.message.c_str()).c_str(), L"更新未完成", MB_OK | MB_ICONWARNING);
             }
+            return 0;
+        }
+        if (LOWORD(wparam) == kResultDigitId && HIWORD(wparam) == BN_CLICKED) {
+            g_state->settings.result_digit_shortcut =
+                SendMessageW(g_state->result_digit_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            set_status(g_state->settings.result_digit_shortcut
+                ? L"已开启：搜索结果中按 1-9 直接应用（小键盘 1-9 不作为快捷应用键）"
+                : L"已关闭：数字键 1-9 不再应用搜索结果", true);
             return 0;
         }
         if (LOWORD(wparam) == kDictionaryId) { edit_dictionary(); return 0; }
@@ -4771,6 +4936,15 @@ A_Err bridge_idle_hook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleep) {
         } processing;
         refresh_host_theme();
         ensure_hotkey_window();
+        // Parked scripts (queued while an AE modal dialog was up) run as soon as
+        // the dialog is gone. This is what keeps the first action after an AE
+        // restart from failing with AE's own modal-script error.
+        if (!g_deferred_scripts.empty()) {
+            if (run_deferred_script_on_idle()) {
+                if (max_sleep && *max_sleep > 6) *max_sleep = 6;
+                return A_Err_NONE;
+            }
+        }
         tick_updates();
         if (max_sleep && *max_sleep > 6) *max_sleep = 6;
         if (g_pending_snapshot) {

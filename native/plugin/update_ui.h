@@ -31,6 +31,19 @@ const char* update_state_name(xfx::UpdateInfo::State state) {
     default: return "idle";
     }
 }
+// True when the failure is transient (rate limit, offline, timeout) rather than a
+// real configuration problem. These must not look like errors to the user: GitHub's
+// unauthenticated API allows only 60 requests/hour per IP, and a shared connection
+// can exhaust that at any time. Nothing is wrong with the plugin or the user's setup.
+bool update_failure_is_transient(const std::string& message) {
+    std::string lower = message;
+    for (auto& ch : lower) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    for (const char* needle : {"rate limit", "403", "forbidden", "timed out", "timeout",
+             "connect", "network", "unreachable", "resolve", "dns", "reset", "offline"}) {
+        if (lower.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
 void refresh_update_ui() {
     const auto info = update_info();
     xfx::script_bridge().set_update_status(update_state_name(info.state), info.version);
@@ -74,13 +87,20 @@ void tick_updates() {
     if (g_user_check_active && (info.state == xfx::UpdateInfo::Current ||
             info.state == xfx::UpdateInfo::Available || info.state == xfx::UpdateInfo::Failed)) {
         g_user_check_active = false;
-        ModalGuard modal;
-        const auto result = info.state == xfx::UpdateInfo::Failed ?
-            L"检查更新未完成：\n" + utf8_to_wide(info.message.c_str()) + L"\n请检查网络后从设置或关于窗口重试；无法联网不代表已经最新。" :
-            info.state == xfx::UpdateInfo::Current ? std::wstring(L"没有发现更高版本的正式效果控制台发行版。") :
-            L"发现正式新版 " + utf8_to_wide(info.version.c_str()) + L"。\n点击面板“更新”按钮查看说明并下载。";
-        MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(), result.c_str(),
-            L"检查更新", MB_OK | (info.state == xfx::UpdateInfo::Failed ? MB_ICONWARNING : MB_ICONINFORMATION));
+        // A rate limit or an offline machine is not an error worth a warning box: it
+        // resolves itself and nothing is misconfigured. Report it in the status line
+        // and only use a dialog for actionable outcomes.
+        if (info.state == xfx::UpdateInfo::Failed && update_failure_is_transient(info.message)) {
+            set_status(L"暂时无法检查更新（GitHub 限流或网络不可用），稍后会自动重试；这不代表已是最新版本", false);
+        } else {
+            ModalGuard modal;
+            const auto result = info.state == xfx::UpdateInfo::Failed ?
+                L"检查更新未完成：\n" + utf8_to_wide(info.message.c_str()) + L"\n请检查网络后从设置或关于窗口重试；无法联网不代表已经最新。" :
+                info.state == xfx::UpdateInfo::Current ? std::wstring(L"没有发现更高版本的正式效果控制台发行版。") :
+                L"发现正式新版 " + utf8_to_wide(info.version.c_str()) + L"。\n点击面板“更新”按钮查看说明并下载。";
+            MessageBoxW(IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow(), result.c_str(),
+                L"检查更新", MB_OK | (info.state == xfx::UpdateInfo::Failed ? MB_ICONWARNING : MB_ICONINFORMATION));
+        }
     }
     if (g_user_update_active && (info.state == xfx::UpdateInfo::Failed || info.state == xfx::UpdateInfo::Ready)) {
         g_user_update_active = false;
