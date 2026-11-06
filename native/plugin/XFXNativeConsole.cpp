@@ -83,6 +83,8 @@ constexpr int kHotkeySaveId = 1007;
 constexpr int kModeId = 1008;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
+// Read-only version label pinned to the bottom-right corner of the console.
+constexpr int kVersionLabelId = 1042;
 constexpr int kStatusId = 1009;
 constexpr int kCountId = 1010;
 constexpr int kTitleId = 1011;
@@ -111,7 +113,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.3";
+constexpr char kProductVersion[] = "1.1.4";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -611,6 +613,7 @@ struct PluginState {
     HWND hotkey_save = nullptr;
     HWND mode_checkbox = nullptr;
     HWND result_digit_checkbox = nullptr;
+    HWND version_label = nullptr;
     HWND status = nullptr;
     HWND update_button = nullptr;
     bool update_available = false;
@@ -1229,7 +1232,6 @@ bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
         (GetKeyState(VK_SHIFT) & 0x8000) || ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) ||
         GetWindowTextLengthW(g_state->search) != 0 ||
         g_state->settings.slots[static_cast<size_t>(slot)].empty()) return false;
-    if (in_search) g_state->suppressed_search_character = static_cast<wchar_t>('1' + slot);
     if (!(flags & (1L << 30))) execute_slot(slot);
     return true;
 }
@@ -1264,10 +1266,8 @@ bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
         return false;
     }
     if (flags & (1L << 30)) return true; // auto-repeat: consume, apply once
-    if (in_search) {
-        // Swallow the character message that would otherwise insert the digit.
-        g_state->suppressed_search_character = static_cast<wchar_t>(key);
-    }
+    // The matching WM_CHAR is dropped by the deterministic digit policy, so no state
+    // has to survive between the two messages.
     SendMessageW(g_state->results, LB_SETCURSEL, static_cast<WPARAM>(row), 0);
     execute_selected();
     return true;
@@ -1362,8 +1362,28 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, IsWindowEnabled(hwnd) ? colors().text : colors().disabled);
         wchar_t text[128]{}; GetWindowTextW(hwnd, text, 128);
         const int margin = MulDiv(4, GetDpiForWindow(hwnd), 96);
+        // Recording state is shown in the field itself: an accent frame plus a caret,
+        // so clicking the box gives obvious feedback even if the eye is not on the
+        // bottom status line.
+        const bool recording = GetFocus() == hwnd && IsWindowEnabled(hwnd);
+        if (recording) {
+            RECT frame = bounds;
+            xfx::paint_round_rect(dc, frame, colors().input,
+                static_cast<float>(MulDiv(3, GetDpiForWindow(hwnd), 96)), colors().accent);
+        }
         bounds.left += margin; bounds.right -= margin;
         DrawTextW(dc, text, -1, &bounds, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        if (recording) {
+            SIZE extent{};
+            GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &extent);
+            const int caret_x = (std::min)(bounds.left + extent.cx + 1, bounds.right - 2);
+            RECT caret{caret_x, bounds.top + MulDiv(3, GetDpiForWindow(hwnd), 96),
+                       caret_x + MulDiv(1, GetDpiForWindow(hwnd), 96),
+                       bounds.bottom - MulDiv(3, GetDpiForWindow(hwnd), 96)};
+            HBRUSH caret_brush = CreateSolidBrush(colors().accent);
+            FillRect(dc, &caret, caret_brush);
+            DeleteObject(caret_brush);
+        }
         if (saved) RestoreDC(dc, saved);
         if (message == WM_PAINT) EndPaint(hwnd, &paint);
         return 0;
@@ -1486,12 +1506,23 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         DrawTextW(dc,cue,-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
         if(saved)RestoreDC(dc,saved);if(message==WM_PAINT)EndPaint(hwnd,&paint);return 0;
     }
-    if (message == WM_CHAR && g_state->suppressed_search_character) {
-        const bool suppress = wparam == g_state->suppressed_search_character;
-        g_state->suppressed_search_character = 0;
-        if (suppress) return 0;
+    if (message == WM_CHAR) {
+        // Deterministic digit policy, no leftover state: while the shortcut is on, a
+        // main-row digit is never inserted as text. Ctrl+digit inserts a real digit and
+        // is handled in WM_KEYDOWN, where the modifier state is reliable.
+        const bool plain_digit = wparam >= L'1' && wparam <= L'9';
+        if (plain_digit && g_state->settings.result_digit_shortcut &&
+            !(GetKeyState(VK_CONTROL) & 0x8000) &&
+            !g_state->settings_visible && !shortcut_list_mode()) return 0;
     }
     if (message == WM_KEYDOWN) {
+        // Ctrl + main-row digit: let the default edit control handle it so the digit is
+        // inserted through the normal character path. Returning here with our own
+        // EM_REPLACESEL proved unreliable with IMEs; falling through to the default
+        // proc is what actually types the character.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wparam >= '1' && wparam <= '9') {
+            return DefWindowProcW(hwnd, message, wparam, lparam);
+        }
         // Favourites slots win when the search box is empty; otherwise the digits
         // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
@@ -2130,12 +2161,15 @@ ULONGLONG g_deferred_since = 0;
 
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback);
 bool ae_modal_pending();
+bool host_scripting_available();
 
 // Public entry point. When AE is waiting on a modal dialog the script is parked and
 // executed from the next idle callback instead of failing with AE's own error
 // dialog; otherwise it runs immediately as before.
 xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback = true) {
-    if (ae_modal_pending()) {
+    // Primary guard: ask AE directly. This runs before any modal-depth bookkeeping, so
+    // the decision cannot be polluted by our own state.
+    if (!host_scripting_available() || ae_modal_pending()) {
         if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
         xfx::ScriptReply deferred;
         deferred.succeeded = false;
@@ -2240,6 +2274,23 @@ bool is_modal_script_rejection(const std::string& message) {
     return false;
 }
 
+// Asks the host whether scripting may run right now. Cheap, side-effect free, and
+// the only reliable signal: AEGP_ExecuteScript fails (and AE shows its own error
+// dialog) exactly when this returns false. Called before any state is mutated so a
+// parked request leaves no trace behind.
+bool host_scripting_available() {
+    if (!g_basic) return false;
+    try {
+        AEGP_SuiteHandler suites(g_basic);
+        A_Boolean available = FALSE;
+        if (suites.UtilitySuite6()->AEGP_IsScriptingAvailable(&available) != A_Err_NONE) return true;
+        return available != FALSE;
+    } catch (...) {
+        // Fail open: if the probe itself cannot run, let the normal path try.
+        return true;
+    }
+}
+
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback = true) {
     ModalGuard modal;
     std::unique_ptr<BusyFeedback> feedback;
@@ -2254,19 +2305,7 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
     AEGP_MemHandle result_handle = nullptr, error_handle = nullptr;
     try {
         AEGP_SuiteHandler suites(g_basic);
-        // Ask the host first. AEGP_IsScriptingAvailable is the documented way to know
-        // whether a script may run right now; it is false exactly while AE is waiting
-        // on a modal dialog. Checking up front is what stops the modal error dialog:
-        // once AEGP_ExecuteScript fails, AE has already shown it.
-        A_Boolean scripting_available = TRUE;
-        if (suites.UtilitySuite6()->AEGP_IsScriptingAvailable(&scripting_available) == A_Err_NONE &&
-            !scripting_available) {
-            if (g_deferred_scripts.size() < 8) g_deferred_scripts.push_back({script, show_feedback});
-            xfx::ScriptReply deferred;
-            deferred.pending = true;
-            deferred.message = "AE 正在等待对话框关闭，操作已排队";
-            return deferred;
-        }
+
         const auto read_handle = [&](AEGP_MemHandle handle) {
             std::string text;
             if (!handle) return text;
@@ -3703,7 +3742,9 @@ void layout_controls(HWND hwnd) {
         ShowWindow(g_state->update_button, update_in_footer ? SW_SHOWNA : SW_HIDE);
     }
     const int update_width = update_in_footer ? 128 : 0;
-    move(g_state->status,8,height-20,inner-update_width,18);
+    const int version_width = ui_px(46);
+    move(g_state->status,8,height-20,inner-update_width-version_width,18);
+    move(g_state->version_label,inner+8-version_width,height-20,version_width,18);
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
                         g_state->refresh, g_state->dictionary, g_state->hotkey_save,
                         g_state->import_settings, g_state->export_settings, g_state->update_button})
@@ -4112,6 +4153,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
                        WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_CENTERIMAGE | SS_ENDELLIPSIS, kStatusId);
+        // Version is always visible in the bottom-right corner so the user can tell at
+        // a glance which build is running without opening any dialog.
+        create_control(hwnd, &g_state->version_label, L"STATIC",
+                       (std::wstring(L"v") + utf8_to_wide(kProductVersion)).c_str(),
+                       WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE | SS_NOPREFIX, kVersionLabelId);
+        if (g_state->version_label && g_state->status) {
+            SendMessageW(g_state->version_label, WM_SETFONT,
+                         reinterpret_cast<WPARAM>(g_state->status_font ? g_state->status_font : g_state->font), TRUE);
+        }
         SetWindowSubclass(g_state->status, edge_drag_proc, kEdgeDragSubclassId, 0);
         g_state->tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
             WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -4648,6 +4698,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_state->search_brush=nullptr;
         g_state->hotkey_edit = nullptr;
         g_state->status = nullptr;
+        g_state->version_label = nullptr;
         g_state->update_button = nullptr;
         g_state->window = nullptr;
         g_state->ime_source_window = nullptr;
