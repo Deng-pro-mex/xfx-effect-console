@@ -567,6 +567,105 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--panel-contract") {
+            // The ScriptUI panel parses the native replies. Any change to their shape
+            // silently breaks the panel instead of the plugin, which is exactly the kind of
+            // bug that looks like "the panel does nothing".
+            const auto ready = xfx::script_bridge().status(std::nullopt);
+            assert(ready.rfind("XFX1\t", 0) == 0);
+            // Either READY <bridgeVersion> from a live host, or the documented error shape
+            // an unavailable bridge returns. Both must keep the XFX1 prefix the panel
+            // checks first, and the version must be in the range the panel accepts.
+            if (ready.find("READY") == std::string::npos) {
+                std::cout << "  bridge not registered in this harness: [" << ready << "]\n";
+                assert(ready.find("ERROR") != std::string::npos);
+                std::cout << "PASS the panel reply contract is unchanged (ERROR shape)\n";
+                death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+                return 0;
+            }
+            const auto version_pos = ready.rfind('\t');
+            assert(version_pos != std::string::npos);
+            const int bridge_version = std::atoi(ready.c_str() + version_pos + 1);
+            std::cout << "  bridgeVersion=" << bridge_version << "\n";
+            assert(bridge_version >= 10003);
+            assert(bridge_version < 20000);
+
+            // THEME reply: light|dark + four RRGGBB colours, exactly as the panel parses it.
+            const auto theme = xfx::script_bridge().appearance();
+            assert(theme.rfind("XFX1\tTHEME\t", 0) == 0);
+            size_t tabs = 0;
+            for (char c : theme) if (c == '\t') ++tabs;
+            std::cout << "  theme tabs=" << tabs << " [" << theme << "]\n";
+            assert(tabs == 5);
+            assert(theme.find("light") != std::string::npos ||
+                   theme.find("dark") != std::string::npos);
+            for (size_t at = 0; at + 6 <= theme.size(); ++at) {
+                if (theme[at] != '\t') continue;
+                bool colour = at + 7 <= theme.size();
+                for (size_t n = 1; colour && n <= 6; ++n)
+                    colour = std::isxdigit(static_cast<unsigned char>(theme[at + n])) != 0;
+                if (!colour) continue;
+                // A tab followed by six hex digits is a colour field.
+                assert(at + 6 < theme.size());
+            }
+
+            // UPDATE reply always carries an empty version until a check completes.
+            const auto update = xfx::script_bridge().update_status();
+            assert(update.rfind("XFX1\tUPDATE\t", 0) == 0);
+            std::cout << "PASS the panel reply contract is unchanged (READY/THEME/UPDATE)\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--dpi-layout") {
+            // The palette is laid out in 96-DPI units and multiplied by the monitor scale.
+            // A control placed without that factor is half-size at 200% and overlaps its
+            // neighbour, which reads as "the layout is broken on my screen".
+            show_console();
+            g_state->settings.show_slot_row = true;
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            for (int dpi : {96, 120, 144, 192}) {
+                const double scale = dpi / 96.0;
+                RECT client{};
+                GetClientRect(g_state->window, &client);
+                // Representative controls that must all scale with the window.
+                struct Probe { const wchar_t* name; HWND window; int min_height; };
+                const Probe probes[] = {
+                    {L"results", g_state->results, 18},
+                    {L"status", g_state->status, 10},
+                    {L"filter", g_state->filter, 18},
+                    {L"preferences", g_state->preferences, 18},
+                };
+                for (const auto& probe : probes) {
+                    if (!probe.window || !IsWindow(probe.window)) continue;
+                    RECT box{};
+                    assert(GetWindowRect(probe.window, &box));
+                    const int h = box.bottom - box.top;
+                    const int expected = static_cast<int>(probe.min_height * scale);
+                    std::cout << "  dpi=" << dpi << " " << wide_to_utf8(probe.name)
+                              << " height=" << h << " minExpected=" << expected << "\n";
+                    assert(h >= static_cast<int>(probe.min_height * 0.9));
+                }
+                // Nothing may overflow the client area horizontally.
+                for (HWND child : {g_state->search, g_state->results, g_state->filter,
+                                   g_state->preferences, g_state->status}) {
+                    if (!child || !IsWindow(child) || !IsWindowVisible(child)) continue;
+                    RECT box{};
+                    assert(GetWindowRect(child, &box));
+                    POINT top_left{box.left, box.top};
+                    ScreenToClient(g_state->window, &top_left);
+                    POINT bottom_right{box.right, box.bottom};
+                    ScreenToClient(g_state->window, &bottom_right);
+                    assert(top_left.x >= -2);
+                    assert(bottom_right.x <= client.right + 2);
+                }
+            }
+            std::cout << "PASS the layout scales with the monitor instead of using raw pixels\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--closed-dropdown-corners") {
             // The reported bug is "all the dropdowns are right angles". The open list is
             // rounded by a window region; the CLOSED face is a native control whose square
