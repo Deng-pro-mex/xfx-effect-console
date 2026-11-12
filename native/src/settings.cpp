@@ -124,10 +124,21 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
     std::wistringstream lines(decode_settings(raw));
     std::wstring line;
     bool explicit_theme_mode = false;
+    bool explicit_ime_mode = false;
     while (std::getline(lines, line)) {
         if (!line.empty() && line.back() == L'\r') line.pop_back();
-        if (line.rfind(L"UseEnglishMode=", 0) == 0) {
+        if (line.rfind(L"ImeMode=", 0) == 0) {
+            const auto mode = line.substr(8);
+            if (mode == L"restore") settings.ime_mode = ImeMode::Restore;
+            else if (mode == L"chinese-on-open") settings.ime_mode = ImeMode::ChineseOnOpen;
+            else if (mode == L"english-always") settings.ime_mode = ImeMode::EnglishAlways;
+            else if (mode == L"disabled") settings.ime_mode = ImeMode::Disabled;
+            else throw std::invalid_argument("输入法模式必须是 restore、chinese-on-open、english-always 或 disabled。");
+            explicit_ime_mode = true;
+        } else if (line.rfind(L"UseEnglishMode=", 0) == 0) {
+            // Legacy key from before the mode dropdown existed.
             settings.use_english_mode = line.substr(15) == L"1";
+            settings.ime_mode = settings.use_english_mode ? ImeMode::Restore : ImeMode::Disabled;
         } else if (line.rfind(L"FixedWindow=", 0) == 0) {
             settings.fixed_window = line.substr(12) == L"1";
         } else if (line.rfind(L"AutoClose=", 0) == 0) {
@@ -156,6 +167,8 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
             settings.capture_directory = directory;
         } else if (line.rfind(L"UseEnglishInputMethod=", 0) == 0) {
             settings.use_english_mode = line.substr(22) == L"1";
+            if (!explicit_ime_mode)
+                settings.ime_mode = settings.use_english_mode ? ImeMode::Restore : ImeMode::Disabled;
         } else if (line.rfind(L"Hotkey=", 0) == 0) {
             settings.hotkey = line.substr(7);
         } else if (line.rfind(L"Favorite=", 0) == 0) {
@@ -186,6 +199,16 @@ void SettingsStore::save(const std::filesystem::path& path, const Settings& sett
     validate_settings(settings);
     std::wostringstream output;
     output << L"UseEnglishMode=" << (settings.use_english_mode ? L"1" : L"0") << L"\r\n";
+    {
+        const wchar_t* mode = L"restore";
+        switch (settings.ime_mode) {
+            case ImeMode::Restore: mode = L"restore"; break;
+            case ImeMode::ChineseOnOpen: mode = L"chinese-on-open"; break;
+            case ImeMode::EnglishAlways: mode = L"english-always"; break;
+            case ImeMode::Disabled: mode = L"disabled"; break;
+        }
+        output << L"ImeMode=" << mode << L"\r\n";
+    }
     output << L"FixedWindow=" << (settings.fixed_window ? L"1" : L"0") << L"\r\n";
     output << L"AutoClose=" << (settings.auto_close ? L"1" : L"0") << L"\r\n";
     output << L"ResultDigitShortcut=" << (settings.result_digit_shortcut ? L"1" : L"0") << L"\r\n";

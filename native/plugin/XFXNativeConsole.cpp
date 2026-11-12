@@ -80,7 +80,7 @@ constexpr int kApplyId = 1004;
 constexpr int kRefreshId = 1005;
 constexpr int kHotkeyEditId = 1006;
 constexpr int kHotkeySaveId = 1007;
-constexpr int kModeId = 1008;
+constexpr int kImeModeId = 1008;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
 constexpr int kDiagnosticLogId = 1043;
@@ -115,7 +115,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.12";
+constexpr char kProductVersion[] = "1.2.0";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -613,7 +613,7 @@ struct PluginState {
     HWND refresh = nullptr;
     HWND hotkey_edit = nullptr;
     HWND hotkey_save = nullptr;
-    HWND mode_checkbox = nullptr;
+    HWND ime_mode_combo = nullptr;
     HWND result_digit_checkbox = nullptr;
     HWND diagnostic_checkbox = nullptr;
     HWND export_log_button = nullptr;
@@ -1139,7 +1139,20 @@ HWND current_host_input_window() {
 }
 
 bool ensure_search_english_mode() {
-    if (!g_state->settings.use_english_mode) return true;
+    // Disabled leaves the input method completely alone.
+    if (g_state->settings.ime_mode == xfx::ImeMode::Disabled) return true;
+    // Chinese-on-open actively turns Chinese ON, which is the inverse of the others.
+    if (g_state->settings.ime_mode == xfx::ImeMode::ChineseOnOpen) {
+        if (!g_state->ime_session_active)
+            g_state->ime_session_active = g_state->ime.capture_original(g_state->search, g_state->ime_source_window);
+        if (g_state->ime_session_active && g_state->ime.enable_chinese_mode()) {
+            set_status(L"已切换为中文输入法", true);
+            return true;
+        }
+        g_state->ime_session_active = false;
+        set_status(L"当前输入法未能切换为中文模式，保持原状态");
+        return false;
+    }
     if (!g_state->ime_session_active)
         g_state->ime_session_active = g_state->ime.capture_original(g_state->search, g_state->ime_source_window);
     if (g_state->ime_session_active && g_state->ime.enable_english_mode()) return true;
@@ -1208,11 +1221,8 @@ bool drag_button_is_held() {
 void save_hotkey();
 // Re-registers the configured shortcut after recording released it.
 void restore_suspended_hotkey();
-// Modifiers that were pressed during the current recording session. Tapping Ctrl and
-// only then pressing the final key is normal user behaviour, and the live key state is
-// already zero at that point, so the presses are remembered here.
-UINT g_record_modifiers = 0;
-void reset_record_modifiers() { g_record_modifiers = 0; }
+// Recording is hold-based: the modifier must still be down when the final key is
+// pressed. This tracks only the key pressed last, for the live prompt text.
 void toggle_console();
 void save_settings();
 bool execute_selected();
@@ -1436,7 +1446,6 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
                 UnhookWindowsHookEx(g_state->keyboard_hook);
                 g_state->keyboard_hook = nullptr;
             }
-            reset_record_modifiers();
             // Immediate feedback the moment the box is clicked, so the user knows the
             // plugin is listening instead of guessing whether the click registered.
             set_status(L"正在录制快捷键：请按下组合键（如 Ctrl+Alt+Space），Esc 取消");
@@ -1451,7 +1460,6 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
                          reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
             } else {
                 RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
-                reset_record_modifiers();
                 // Leaving the box without recording something must not leave the
                 // console without a working shortcut.
                 restore_suspended_hotkey();
@@ -1468,45 +1476,45 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             // released for recording must come back.
             SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
             restore_suspended_hotkey();
-            reset_record_modifiers();
             set_status(L"已取消录制，快捷键未修改", true);
             SetFocus(g_state->search);
             return 0;
         }
+        // Hold-to-record: the modifier and the key must be down at the same time, which
+        // is exactly how the shortcut will be pressed in normal use. A tapped modifier
+        // that was already released does NOT count, because that combination could never
+        // actually trigger the shortcut.
         if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU ||
             key == VK_LWIN || key == VK_RWIN) {
-            // Remember the press: the user taps the modifier, reads the prompt, and only
-            // then presses the final key. Reading live key state at that later moment
-            // would see zero modifiers and reject the combination.
-            if (key == VK_CONTROL) g_record_modifiers |= MOD_CONTROL;
-            else if (key == VK_SHIFT) g_record_modifiers |= MOD_SHIFT;
-            else if (key == VK_MENU) g_record_modifiers |= MOD_ALT;
-            else g_record_modifiers |= MOD_WIN;
-            // Live feedback so the press is visibly acknowledged.
+            // Remember which modifiers are held so the prompt can list them.
             std::wstring held;
-            if (g_record_modifiers & MOD_CONTROL) held += L"Ctrl+";
-            if (g_record_modifiers & MOD_ALT) held += L"Alt+";
-            if (g_record_modifiers & MOD_SHIFT) held += L"Shift+";
-            if (g_record_modifiers & MOD_WIN) held += L"Win+";
-            set_status(held.empty() ? L"正在录制快捷键：按住修饰键再按一个键"
-                                    : L"正在录制：" + held + L"…再按一个键");
+            if (GetKeyState(VK_CONTROL) & 0x8000) held += L"Ctrl+";
+            if (GetKeyState(VK_MENU) & 0x8000) held += L"Alt+";
+            if (GetKeyState(VK_SHIFT) & 0x8000) held += L"Shift+";
+            if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) held += L"Win+";
+            if (key == VK_CONTROL && held.find(L"Ctrl+") == std::wstring::npos) held += L"Ctrl+";
+            if (key == VK_MENU && held.find(L"Alt+") == std::wstring::npos) held += L"Alt+";
+            if (key == VK_SHIFT && held.find(L"Shift+") == std::wstring::npos) held += L"Shift+";
+            if ((key == VK_LWIN || key == VK_RWIN) && held.find(L"Win+") == std::wstring::npos) held += L"Win+";
+            set_status(held.empty()
+                ? L"正在录制：按住修饰键不要松开，再按另一个键"
+                : L"正在录制：" + held + L"（保持按住）…再按另一个键");
             return 0;
         }
 
         xfx::HotkeySpec spec;
-        // Combine the modifiers held right now with the ones tapped earlier in this
-        // session, so a released Ctrl still counts as part of the shortcut.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) g_record_modifiers |= MOD_CONTROL;
-        if ((GetKeyState(VK_MENU) & 0x8000) != 0) g_record_modifiers |= MOD_ALT;
-        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) g_record_modifiers |= MOD_SHIFT;
+        // Read the live key state: this is the hold test. If the modifier is not still
+        // down, the combination would not fire, so it is refused outright.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) spec.modifiers |= MOD_CONTROL;
+        if ((GetKeyState(VK_MENU) & 0x8000) != 0) spec.modifiers |= MOD_ALT;
+        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) spec.modifiers |= MOD_SHIFT;
         if ((GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0)
-            g_record_modifiers |= MOD_WIN;
-        spec.modifiers = g_record_modifiers;
-        // A bare key with no modifier would hijack ordinary typing, so it stays refused.
+            spec.modifiers |= MOD_WIN;
         if (spec.modifiers == 0) {
-            set_status(L"请先按 Ctrl / Alt / Shift / Win 之一（轻按一下即可），再按另一个键");
+            set_status(L"请按住 Ctrl / Alt / Shift / Win 之一不要松开，再按一个键");
             return 0;
         }
+
         spec.virtual_key = key;
         const std::wstring text = xfx::format_hotkey(spec);
         if (text.empty()) { set_status(L"这个按键无法作为快捷键，请换一个"); return 0; }
@@ -1514,7 +1522,6 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // save_hotkey reports the concrete outcome (registered, or rejected because
         // another program already owns the combination).
         save_hotkey();
-        reset_record_modifiers();
         return 0;
     }
     if (message == WM_CHAR || message == WM_SYSCHAR || message == WM_KEYUP || message == WM_SYSKEYUP) return 0;
@@ -3346,8 +3353,8 @@ void apply_imported_settings(const xfx::Settings& imported) {
     brushes.install();
     rebuild_customized_catalog();
     SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
-    SendMessageW(g_state->mode_checkbox, BM_SETCHECK,
-                 g_state->settings.use_english_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
+                 static_cast<int>(g_state->settings.ime_mode), 0);
     SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
                  g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
@@ -3576,14 +3583,22 @@ void toggle_pinned(const std::wstring& key) {
 
 void save_settings() {
     auto updated = g_state->settings;
-    updated.use_english_mode =
-        SendMessageW(g_state->mode_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    // The combo is the authority; keep the legacy flag in sync for older readers.
+    const auto ime_choice = SendMessageW(g_state->ime_mode_combo, CB_GETCURSEL, 0, 0);
+    if (ime_choice >= 0 && ime_choice <= 3) updated.ime_mode = static_cast<xfx::ImeMode>(ime_choice);
+    updated.use_english_mode = updated.ime_mode == xfx::ImeMode::Restore ||
+                               updated.ime_mode == xfx::ImeMode::EnglishAlways;
     wchar_t hotkey[128] = {};
     GetWindowTextW(g_state->hotkey_edit, hotkey, 128);
     updated.hotkey = hotkey;
     updated.fixed_window = false;
     updated.auto_close = true;
     updated.full_resolution_screenshots = true;
+    // Read the diagnostic switch from its control: save_settings rebuilds the whole
+    // struct, so any control not read here reverts to the stored value and the toggle
+    // silently does nothing.
+    updated.diagnostic_logging =
+        SendMessageW(g_state->diagnostic_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
     try { xfx::SettingsStore::save(settings_path(), updated); }
     catch (...) {
         throw;
@@ -3628,10 +3643,30 @@ void save_hotkey() {
     set_status(L"快捷键已保存",true);
 }
 
+// Applies the closing half of the selected input-method mode.
+void apply_ime_on_close() {
+    switch (g_state->settings.ime_mode) {
+        case xfx::ImeMode::Disabled:
+            break;
+        case xfx::ImeMode::Restore:
+            // Undo the switch so the user gets their previous state back.
+            g_state->ime.restore();
+            break;
+        case xfx::ImeMode::ChineseOnOpen:
+            // User asked for English on close.
+            g_state->ime.commit_english();
+            break;
+        case xfx::ImeMode::EnglishAlways:
+            // English before and after; there is nothing to restore.
+            g_state->ime.commit_english();
+            break;
+    }
+    g_state->ime_session_active = false;
+}
+
 void save_and_restore() {
     try { save_settings(); } catch (...) { set_status(L"配置保存失败，请检查文档目录的写入权限"); }
-    g_state->ime.restore();
-    g_state->ime_session_active = false;
+    apply_ime_on_close();
 }
 
 std::wstring trim_text(std::wstring text) {
@@ -3922,7 +3957,7 @@ void layout_controls(HWND hwnd) {
         const RECT actual{origin.x,origin.y,origin.x+current.right-current.left,origin.y+current.bottom-current.top};
         if (EqualRect(&desired,&actual)) return;
         MoveWindow(child,left,top,width,height,FALSE);
-        if (child == g_state->light_theme) fit_combo_face_height(child, height);
+        if (child == g_state->light_theme || child == g_state->ime_mode_combo) fit_combo_face_height(child, height);
         if (!g_state->redraw_transaction) InvalidateRect(child,nullptr,FALSE);
     };
     const auto toolbar_bounds = toolbar_layout(hwnd);
@@ -3985,7 +4020,7 @@ void layout_controls(HWND hwnd) {
     setting(g_state->import_settings,narrow?8:270,narrow?72:40,64,26);
     setting(g_state->export_settings,narrow?80:342,narrow?72:40,64,26);
     const int theme_y = narrow ? 106 : 74;
-    setting(g_state->mode_checkbox,8,theme_y,narrow?inner:inner-144,24);
+    setting(g_state->ime_mode_combo,8,theme_y,narrow?inner-140:(inner-260),28,24);
     setting(g_state->light_theme,width-136,theme_y+(narrow?30:-2),128,28,24);
     // Results digit-shortcut switch: same row as the update button on wide layouts,
     // and its own row on narrow ones so nothing overlaps.
@@ -4199,7 +4234,7 @@ void update_console_fonts(HWND hwnd) {
     g_state->font=font;g_state->slot_number_font=slot_font;g_state->status_font=status_font;
     EnumChildWindows(hwnd,[](HWND child,LPARAM)->BOOL{set_font(child);return TRUE;},0);
     if(IsWindow(g_state->status))SendMessageW(g_state->status,WM_SETFONT,reinterpret_cast<WPARAM>(g_state->status_important?font:status_font),TRUE);
-    for(HWND combo:{g_state->filter,g_state->light_theme})if(IsWindow(combo)){
+    for(HWND combo:{g_state->filter,g_state->light_theme,g_state->ime_mode_combo})if(IsWindow(combo)){
         SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,dpi,96));
     }
     if(old_font)DeleteObject(old_font);if(old_small)DeleteObject(old_small);if(old_status)DeleteObject(old_status);
@@ -4395,16 +4430,22 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->hotkey_save, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kHotkeySaveId);
         create_control(hwnd, &g_state->import_settings, L"BUTTON", L"导入", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kImportId);
         create_control(hwnd, &g_state->export_settings, L"BUTTON", L"导出", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportId);
-        create_control(hwnd, &g_state->mode_checkbox, L"BUTTON",
-                       L"使用时切换英文输入（关闭后恢复）",
-                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kModeId);
+        create_control(hwnd, &g_state->ime_mode_combo, L"COMBOBOX", L"输入法模式",
+                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                       CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kImeModeId);
+        for (const auto* label : {L"使用时切英文，关闭后恢复（默认）",
+                                  L"打开中文，关闭英文",
+                                  L"始终英文（开关都用英文）",
+                                  L"关闭此功能（不改输入法）"})
+            SendMessageW(g_state->ime_mode_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        SetWindowTheme(g_state->ime_mode_combo, L"", L"");
         create_control(hwnd, &g_state->light_theme, L"COMBOBOX", L"界面主题",
                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kLightThemeId);
         for (const auto* label : {L"跟随", L"浅色", L"深色"})
             SendMessageW(g_state->light_theme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         SetWindowTheme(g_state->light_theme, L"", L"");
-        for(HWND combo : {g_state->filter,g_state->light_theme}) SetWindowSubclass(combo,combo_face_proc,0xB005,0);
-        for(HWND combo : {g_state->filter,g_state->light_theme}) {
+        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo}) SetWindowSubclass(combo,combo_face_proc,0xB005,0);
+        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo}) {
             SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,GetDpiForWindow(hwnd),96));
         }
         create_control(hwnd, &g_state->result_digit_checkbox, L"BUTTON",
@@ -4415,10 +4456,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kDiagnosticLogId);
         create_control(hwnd, &g_state->export_log_button, L"BUTTON", L"导出日志",
                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportLogId);
-        for (HWND checkbox : {g_state->mode_checkbox, g_state->result_digit_checkbox,
-                              g_state->diagnostic_checkbox})
+        for (HWND checkbox : {g_state->result_digit_checkbox, g_state->diagnostic_checkbox})
             SetWindowTheme(checkbox, L"", L"");
-        SetWindowSubclass(g_state->mode_checkbox,checkbox_face_proc,0xB007,0);
         SetWindowSubclass(g_state->result_digit_checkbox,checkbox_face_proc,0xB008,0);
         SetWindowSubclass(g_state->diagnostic_checkbox,checkbox_face_proc,0xB00A,0);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
@@ -4444,8 +4483,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             SendMessageW(g_state->tooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 10000);
         }
         SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
-        SendMessageW(g_state->mode_checkbox, BM_SETCHECK,
-                     g_state->settings.use_english_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
+                     static_cast<int>(g_state->settings.ime_mode), 0);
         SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
                      g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_state->diagnostic_checkbox, BM_SETCHECK,
@@ -4482,7 +4521,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_state->search, g_state->filter, g_state->capture, g_state->slot, g_state->preferences,
             g_state->refresh, g_state->dictionary,
             g_state->hotkey_edit, g_state->hotkey_save, g_state->import_settings, g_state->export_settings,
-            g_state->mode_checkbox, g_state->light_theme
+            g_state->ime_mode_combo, g_state->light_theme
         };
         const wchar_t* tips[] = {
             L"搜索效果、预设、中文、拼音、英文或 matchName",
@@ -4556,14 +4595,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_MEASUREITEM: {
         auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
         if (measure->CtlID == kResultsId) measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;
-        if (measure->CtlID == kFilterId || measure->CtlID == kLightThemeId) measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
+        if (measure->CtlID == kFilterId || measure->CtlID == kLightThemeId ||
+            measure->CtlID == kImeModeId) measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
         return TRUE;
     }
     case WM_DRAWITEM: {
         auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
         struct RestoreDrawDc {HDC dc;int saved;~RestoreDrawDc(){if(saved)RestoreDC(dc,saved);}} restore{draw->hDC,SaveDC(draw->hDC)};
         SelectObject(draw->hDC,g_state->font);
-        if (draw->CtlID == kFilterId || draw->CtlID == kLightThemeId) {
+        if (draw->CtlID == kFilterId || draw->CtlID == kLightThemeId ||
+            draw->CtlID == kImeModeId) {
             if (draw->itemState & ODS_COMBOBOXEDIT) {
                 IntersectClipRect(draw->hDC, draw->rcItem.left, draw->rcItem.top, draw->rcItem.right, draw->rcItem.bottom);
                 draw_combo_face(draw->hwndItem, draw->hDC);
@@ -4814,23 +4855,39 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
         if (LOWORD(wparam) == kDictionaryId) { edit_dictionary(); return 0; }
-        if (LOWORD(wparam) == kModeId && HIWORD(wparam) == BN_CLICKED) {
-            const bool enabled = SendMessageW(g_state->mode_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            g_state->settings.use_english_mode = enabled;
-            if (enabled) {
-                SetFocus(g_state->search);
-                if (!ensure_search_english_mode()) {
-                    g_state->ime.restore();
-                    g_state->ime_session_active = false;
-                    g_state->settings.use_english_mode = false;
-                    SendMessageW(g_state->mode_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
-                } else {
-                    set_status(L"当前输入法已切换为英文模式", true);
-                }
-            } else {
-                g_state->ime.restore();
-                g_state->ime_session_active = false;
-                set_status(L"已恢复插件使用前的输入法模式", true);
+        if (LOWORD(wparam) == kImeModeId && HIWORD(wparam) == CBN_SELCHANGE) {
+            const auto choice = static_cast<int>(SendMessageW(g_state->ime_mode_combo, CB_GETCURSEL, 0, 0));
+            if (choice < 0 || choice > 3) return 0;
+            g_state->settings.ime_mode = static_cast<xfx::ImeMode>(choice);
+            g_state->settings.use_english_mode =
+                g_state->settings.ime_mode == xfx::ImeMode::Restore ||
+                g_state->settings.ime_mode == xfx::ImeMode::EnglishAlways;
+            // Undo whatever the previous mode did before applying the new one, so
+            // switching modes never leaves a half-applied input state behind.
+            g_state->ime.restore();
+            g_state->ime_session_active = false;
+            try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
+            catch (...) { set_status(L"输入法模式未能保存，请检查文档目录的写入权限"); return 0; }
+            if (g_state->settings.ime_mode == xfx::ImeMode::Disabled) {
+                set_status(L"已关闭输入法切换：打开和关闭插件都不改动输入法", true);
+                return 0;
+            }
+            if (!ensure_search_english_mode()) {
+                set_status(L"输入法模式已保存，但当前输入法未能切换，将在下次打开时重试");
+                return 0;
+            }
+            switch (g_state->settings.ime_mode) {
+                case xfx::ImeMode::Restore:
+                    set_status(L"已保存：打开时切英文，关闭后恢复原样", true);
+                    break;
+                case xfx::ImeMode::ChineseOnOpen:
+                    set_status(L"已保存：打开时用中文，关闭后转英文", true);
+                    break;
+                case xfx::ImeMode::EnglishAlways:
+                    set_status(L"已保存：打开和关闭都用英文", true);
+                    break;
+                case xfx::ImeMode::Disabled:
+                    break;
             }
             return 0;
         }
@@ -4902,9 +4959,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             populate_results();
             return 0;
         }
-        if ((LOWORD(wparam) == kFilterId || LOWORD(wparam) == kLightThemeId) &&
-            HIWORD(wparam) == CBN_DROPDOWN) {
-            theme_combo_popup(LOWORD(wparam) == kFilterId ? g_state->filter : g_state->light_theme);
+        if ((LOWORD(wparam) == kFilterId || LOWORD(wparam) == kLightThemeId ||
+             LOWORD(wparam) == kImeModeId) && HIWORD(wparam) == CBN_DROPDOWN) {
+            theme_combo_popup(LOWORD(wparam) == kFilterId ? g_state->filter
+                            : LOWORD(wparam) == kLightThemeId ? g_state->light_theme
+                            : g_state->ime_mode_combo);
             return 0;
         }
         if (LOWORD(wparam) == kSlotId && HIWORD(wparam) == BN_CLICKED) {

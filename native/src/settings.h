@@ -10,7 +10,16 @@ namespace xfx {
 
 enum class ThemeMode { Follow, Light, Dark };
 
+// What happens to the input method when the console opens and closes.
+enum class ImeMode {
+    Restore,        // switch to English on open, restore the previous state on close
+    ChineseOnOpen,  // Chinese on open, English on close
+    EnglishAlways,  // English on open and English on close
+    Disabled        // leave the input method completely alone
+};
+
 struct Settings {
+    // Kept for older import files; ime_mode is authoritative.
     bool use_english_mode = false;
     bool fixed_window = false;
     bool auto_close = true;
@@ -21,10 +30,11 @@ struct Settings {
     // results on screen. Off by default for users who want digits to type normally;
     // the numeric keypad is always excluded from this shortcut.
     bool result_digit_shortcut = true;
+    ImeMode ime_mode = ImeMode::Restore;
     // Verbose diagnostic logging. Off by default so normal use writes only a small
     // error log; the settings page can turn it on when a problem must be reported
     // from another machine.
-    bool diagnostic_logging = false;
+    bool diagnostic_logging = true;
     // Empty retains the existing product Capture directory for upgrades.
     std::wstring capture_directory;
     std::wstring hotkey = L"Ctrl+Space";

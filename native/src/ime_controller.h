@@ -9,6 +9,12 @@ class ImeController {
 public:
     bool capture_original(HWND input_window, HWND original_focus = nullptr);
     bool enable_english_mode();
+    // Forces the native (Chinese) conversion mode on, for the "Chinese on open" option.
+    bool enable_chinese_mode();
+    // Leaves the current input state as English, without restoring it later.
+    bool commit_english();
+    // Leaves the current input state as Chinese, without restoring it later.
+    bool commit_chinese();
     void restore();
 #ifdef XFX_CONSOLE_TEST
     HWND test_target_window() const { return target_.window; }

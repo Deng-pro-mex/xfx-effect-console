@@ -66,6 +66,51 @@ bool ImeController::restore_state(const InputState& state) {
     return restored;
 }
 
+bool ImeController::enable_chinese_mode() {
+    if (!captured_ || !IsWindow(target_.window)) return false;
+    HIMC context = ImmGetContext(target_.window);
+    if (!context) return false;
+    changed_ = true;
+    DWORD conversion = target_.has_conversion ? target_.conversion : 0;
+    conversion |= IME_CMODE_NATIVE;
+    if (target_.has_conversion) ImmSetConversionStatus(context, conversion, target_.sentence);
+    ImmSetOpenStatus(context, TRUE);
+    const bool chinese = ImmGetOpenStatus(context) != FALSE;
+    ImmReleaseContext(target_.window, context);
+    if (!chinese) restore();
+    return chinese;
+}
+
+bool ImeController::commit_english() {
+    if (!captured_ || !IsWindow(target_.window)) return true;
+    HIMC context = ImmGetContext(target_.window);
+    if (!context) return false;
+    ImmSetOpenStatus(context, FALSE);
+    const bool english = ImmGetOpenStatus(context) == FALSE;
+    ImmReleaseContext(target_.window, context);
+    if (!english) return false;
+    // Committed: the state is now the new baseline, so closing must not undo it.
+    captured_ = false;
+    changed_ = false;
+    return true;
+}
+
+bool ImeController::commit_chinese() {
+    if (!captured_ || !IsWindow(target_.window)) return true;
+    HIMC context = ImmGetContext(target_.window);
+    if (!context) return false;
+    DWORD conversion = 0, sentence = 0;
+    if (ImmGetConversionStatus(context, &conversion, &sentence))
+        ImmSetConversionStatus(context, conversion | IME_CMODE_NATIVE, sentence);
+    ImmSetOpenStatus(context, TRUE);
+    const bool chinese = ImmGetOpenStatus(context) != FALSE;
+    ImmReleaseContext(target_.window, context);
+    if (!chinese) return false;
+    captured_ = false;
+    changed_ = false;
+    return true;
+}
+
 void ImeController::restore() {
     bool restored = true;
     if (captured_ && changed_) {
