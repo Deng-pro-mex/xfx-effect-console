@@ -155,7 +155,23 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
         } else if (line.rfind(L"ResultDigitShortcut=", 0) == 0) {
             settings.result_digit_shortcut = line.substr(19) != L"0";
         } else if (line.rfind(L"DiagnosticLogging=", 0) == 0) {
-            settings.diagnostic_logging = line.substr(18) != L"0";
+            // No longer user configurable; parsed for compatibility only.
+            settings.diagnostic_logging = true;
+        } else if (line.rfind(L"ShowSlotRow=", 0) == 0) {
+            settings.show_slot_row = line.substr(12) == L"1";
+        } else if (line.rfind(L"SlotRowModifier=", 0) == 0) {
+            settings.slot_row_modifier = line.substr(16);
+        } else if (line.rfind(L"ResultDigitModifier=", 0) == 0) {
+            settings.result_digit_modifier = line.substr(20);
+        } else if (line.rfind(L"SlotButtonLabel=", 0) == 0) {
+            const auto rest = line.substr(16);
+            const auto tab = rest.find(L'=');
+            if (tab != std::wstring::npos) {
+                try {
+                    const int index = std::stoi(rest.substr(0, tab));
+                    if (index >= 0 && index < 9) settings.slot_button_labels[static_cast<size_t>(index)] = rest.substr(tab + 1);
+                } catch (...) { throw std::invalid_argument("快捷栏标签索引必须是 0-8 的数字。"); }
+            }
         } else if (line.rfind(L"FullResolutionScreenshots=", 0) == 0) {
             // Kept as a compatibility record; snapshots are always full resolution.
             settings.full_resolution_screenshots = true;
@@ -212,7 +228,14 @@ void SettingsStore::save(const std::filesystem::path& path, const Settings& sett
     output << L"FixedWindow=" << (settings.fixed_window ? L"1" : L"0") << L"\r\n";
     output << L"AutoClose=" << (settings.auto_close ? L"1" : L"0") << L"\r\n";
     output << L"ResultDigitShortcut=" << (settings.result_digit_shortcut ? L"1" : L"0") << L"\r\n";
-    output << L"DiagnosticLogging=" << (settings.diagnostic_logging ? L"1" : L"0") << L"\r\n";
+    output << L"DiagnosticLogging=1\r\n";
+    output << L"ShowSlotRow=" << (settings.show_slot_row ? L"1" : L"0") << L"\r\n";
+    output << L"SlotRowModifier=" << settings.slot_row_modifier << L"\r\n";
+    output << L"ResultDigitModifier=" << settings.result_digit_modifier << L"\r\n";
+    for (size_t index = 0; index < settings.slot_button_labels.size(); ++index) {
+        if (settings.slot_button_labels[index].empty()) continue;
+        output << L"SlotButtonLabel=" << index << L"=" << settings.slot_button_labels[index] << L"\r\n";
+    }
     output << L"LightTheme=" << (settings.light_theme ? L"1" : L"0") << L"\r\n";
     output << L"ThemeMode=" << (settings.theme_mode == ThemeMode::Follow ? L"follow" :
         settings.theme_mode == ThemeMode::Light ? L"light" : L"dark") << L"\r\n";

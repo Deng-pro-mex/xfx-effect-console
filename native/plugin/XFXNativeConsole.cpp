@@ -81,6 +81,13 @@ constexpr int kRefreshId = 1005;
 constexpr int kHotkeyEditId = 1006;
 constexpr int kHotkeySaveId = 1007;
 constexpr int kImeModeId = 1008;
+// Nine optional favourites buttons in their own strip.
+constexpr int kSlotRowFirstId = 1060;
+constexpr int kSlotRowToggleId = 1070;
+constexpr int kSlotRowKeyId = 1071;
+constexpr int kSlotRowHintId = 1072;
+constexpr int kResultDigitKeyId = 1073;
+constexpr int kResultDigitHintId = 1074;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
 constexpr int kDiagnosticLogId = 1043;
@@ -115,11 +122,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.2.0";
+constexpr char kProductVersion[] = "1.3.0";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
+constexpr int kSlotRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 192;
+constexpr int kSettingsHeight = 280;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -609,6 +617,12 @@ struct PluginState {
     HWND filter = nullptr;
     RECT search_surface_bounds{};
     std::array<HWND, 9> layer_style_buttons{};
+    std::array<HWND, 9> slot_row_buttons{};
+    HWND slot_row_checkbox = nullptr;
+    HWND slot_row_key = nullptr;
+    HWND slot_row_hint = nullptr;
+    HWND result_digit_key = nullptr;
+    HWND result_digit_hint = nullptr;
     HWND results = nullptr;
     HWND refresh = nullptr;
     HWND hotkey_edit = nullptr;
@@ -1254,14 +1268,58 @@ xfx::BridgeCompletion perform_update(bool check_only = false);
 void clear_result_data();
 bool add_tooltip_for_control(HWND parent, HWND tooltip, HWND control, UINT_PTR id, const wchar_t* text);
 
+// Parses one configured modifier name ("Ctrl", "Alt", "Shift", "Win", "Ctrl+Alt").
+// Returns 0 when the text is empty, which means "no modifier".
+int modifier_combo_index(const std::wstring& text) {
+    if (text.empty()) return 0;
+    if (text == L"Ctrl") return 1;
+    if (text == L"Alt") return 2;
+    if (text == L"Shift") return 3;
+    if (text == L"Ctrl+Alt") return 4;
+    return 0;
+}
+
+UINT modifier_from_text(const std::wstring& text) {
+    UINT modifiers = 0;
+    size_t start = 0;
+    while (start <= text.size()) {
+        auto end = text.find(L'+', start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring token = text.substr(start, end - start);
+        while (!token.empty() && iswspace(token.front())) token.erase(token.begin());
+        while (!token.empty() && iswspace(token.back())) token.pop_back();
+        for (auto& character : token) character = static_cast<wchar_t>(std::towupper(character));
+        if (token == L"CTRL" || token == L"CONTROL") modifiers |= MOD_CONTROL;
+        else if (token == L"ALT") modifiers |= MOD_ALT;
+        else if (token == L"SHIFT") modifiers |= MOD_SHIFT;
+        else if (token == L"WIN" || token == L"WINDOWS") modifiers |= MOD_WIN;
+        start = end + 1;
+        if (end == text.size()) break;
+    }
+    return modifiers;
+}
+
+UINT current_modifiers() {
+    UINT modifiers = 0;
+    if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
+    if (GetKeyState(VK_MENU) & 0x8000) modifiers |= MOD_ALT;
+    if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= MOD_SHIFT;
+    if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) modifiers |= MOD_WIN;
+    return modifiers;
+}
+
 bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
-    // Main row only: the numeric keypad is reserved for typing numbers and must never
-    // trigger a shortcut, per the documented input policy.
+    // Runs the favourites strip. The modifier is user configurable so it cannot clash
+    // with the plain-digit "apply Nth result" shortcut.
+    if (!g_state || !g_state->settings.show_slot_row) return false;
     const int slot = (key >= '1' && key <= '9') ? static_cast<int>(key - '1') : -1;
-    if (slot < 0 || (GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
-        (GetKeyState(VK_SHIFT) & 0x8000) || ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) ||
-        GetWindowTextLengthW(g_state->search) != 0 ||
-        g_state->settings.slots[static_cast<size_t>(slot)].empty()) return false;
+    if (slot < 0) return false;
+    const UINT required = modifier_from_text(g_state->settings.slot_row_modifier);
+    if (current_modifiers() != required) return false;
+    if (g_state->settings.slots[static_cast<size_t>(slot)].empty()) return false;
+    // Inside the search box the user may be typing; only a non-empty modifier makes
+    // this an unambiguous shortcut.
+    if (in_search && required == 0 && GetWindowTextLengthW(g_state->search) != 0) return false;
     if (!(flags & (1L << 30))) execute_slot(slot);
     return true;
 }
@@ -1273,15 +1331,13 @@ bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
 // Returns true when the key was consumed.
 bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     if (!g_state || !g_state->settings.result_digit_shortcut) return false;
-    // Only the main-row digits 1-9. The numeric keypad is deliberately excluded so
-    // it always types plain numbers.
+    // Only the main-row digits 1-9. The numeric keypad is deliberately excluded so it
+    // always types plain numbers. The digit itself is fixed: only the modifier prefix
+    // is configurable, because the numbering drawn on screen is the contract.
     if (key < '1' || key > '9') return false;
-    // Ctrl + digit stays available for the favourites-slot bindings, and Alt/Win are
-    // left to the system.
-    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
-        ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000)) return false;
-    // The favourites strip owns the digits when the query is empty, and the settings
-    // page must keep its digits for text fields.
+    const UINT required = modifier_from_text(g_state->settings.result_digit_modifier);
+    if (current_modifiers() != required) return false;
+    // The favourites strip and the settings page own their keys.
     if (shortcut_list_mode() || g_state->settings_visible) return false;
     // The digits address the rows the user can SEE, not the absolute head of the
     // list. Scrolling changes which items the same digits apply, which is what the
@@ -1294,15 +1350,12 @@ bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
         // No such result: consume the key anyway so the number never leaks into the
         // search box, and tell the user why nothing happened.
         if (in_search) {
-            set_status(L"搜索结果不足 " + std::to_wstring(row + 1) + L" 条；数字键只用于应用结果，"
-                       L"要输入数字请用小键盘或 Ctrl+数字");
+            set_status(L"搜索结果不足 " + std::to_wstring(row - offset + 1) + L" 条");
             return true;
         }
         return false;
     }
     if (flags & (1L << 30)) return true; // auto-repeat: consume, apply once
-    // The matching WM_CHAR is dropped by the deterministic digit policy, so no state
-    // has to survive between the two messages.
     SendMessageW(g_state->results, LB_SETCURSEL, static_cast<WPARAM>(row), 0);
     execute_selected();
     return true;
@@ -1601,7 +1654,7 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         const bool from_main_row = scan >= 0x02 && scan <= 0x0A;
         const bool from_keypad = scan >= 0x47 && scan <= 0x53;
         if (from_main_row && g_state->settings.result_digit_shortcut &&
-            !(GetKeyState(VK_CONTROL) & 0x8000) &&
+            current_modifiers() == modifier_from_text(g_state->settings.result_digit_modifier) &&
             !g_state->settings_visible && !shortcut_list_mode()) {
             return 0;   // apply-only: the digit must never be typed
         }
@@ -1615,7 +1668,10 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // WM_CHAR at all for Ctrl+digit (confirmed by apply-trace.log, which shows no
         // character message for that combination), so any character-stage handling is
         // dead code. Insert the digit directly instead.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wparam >= '1' && wparam <= '9') {
+        // Ctrl + digit types the digit, unless the user made Ctrl the result-apply
+        // modifier, in which case it is a shortcut instead.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wparam >= '1' && wparam <= '9' &&
+            (modifier_from_text(g_state->settings.result_digit_modifier) & MOD_CONTROL) == 0) {
             const wchar_t digit[2] = { static_cast<wchar_t>(wparam), L'\0' };
             SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(digit));
             return 0;
@@ -2318,9 +2374,9 @@ std::wstring trace_log_path() {
 }
 
 void update_trace(const std::string& text, bool always) {
-    if (!always) {
-        if (!g_state || !g_state->settings.diagnostic_logging) return;
-    }
+    // Always record. Diagnostics are not optional: a problem on someone else's machine
+    // is only debuggable if the evidence was captured before anyone noticed.
+    (void)always;
     const std::wstring path = trace_log_path();
     if (path.empty()) return;
     try {
@@ -3252,6 +3308,45 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
     }
     if (message == WM_DRAWITEM) {
         const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+        if (draw->CtlType == ODT_BUTTON &&
+            draw->CtlID >= kSlotRowFirstId && draw->CtlID < kSlotRowFirstId + 9) {
+            // Favourites strip: show the user label, or the bound item name.
+            const size_t index = static_cast<size_t>(draw->CtlID - kSlotRowFirstId);
+            std::wstring label = g_state->settings.slot_button_labels[index];
+            if (label.empty()) {
+                const auto& key = g_state->settings.slots[index];
+                label = key.empty() ? std::to_wstring(index + 1) : L"…";
+                for (const auto& item : g_state->catalog) {
+                    if (item_key(item) == key) { label = item_display_label(item); break; }
+                }
+            }
+            const int width = draw->rcItem.right - draw->rcItem.left;
+            const int height = draw->rcItem.bottom - draw->rcItem.top;
+            if (width <= 0 || height <= 0) return TRUE;
+            HDC buffer = CreateCompatibleDC(draw->hDC);
+            HBITMAP bitmap = CreateCompatibleBitmap(draw->hDC, width, height);
+            if (buffer && bitmap) {
+                const auto previous_bitmap = SelectObject(buffer, bitmap);
+                const auto previous_font = SelectObject(buffer, g_state->font);
+                DRAWITEMSTRUCT frame = *draw;
+                frame.hDC = buffer;
+                frame.rcItem = {0, 0, width, height};
+                paint_text_button(frame);
+                SetBkMode(buffer, TRANSPARENT);
+                SetTextColor(buffer, (draw->itemState & ODS_SELECTED) ? colors().selected_text : colors().text);
+                RECT text_rect{2, 0, width - 2, height};
+                SelectObject(buffer, g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+                DrawTextW(buffer, label.c_str(), -1, &text_rect,
+                    DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+                BitBlt(draw->hDC, draw->rcItem.left, draw->rcItem.top, width, height,
+                    buffer, 0, 0, SRCCOPY);
+                SelectObject(buffer, previous_font);
+                SelectObject(buffer, previous_bitmap);
+            }
+            if (bitmap) DeleteObject(bitmap);
+            if (buffer) DeleteDC(buffer);
+            return TRUE;
+        }
         if (draw->CtlType == ODT_BUTTON) { paint_text_button(*draw); return TRUE; }
         if (draw->CtlType != ODT_LISTBOX) return FALSE;
         if (draw->itemID >= g_state->captures.size()) return TRUE;
@@ -3594,11 +3689,9 @@ void save_settings() {
     updated.fixed_window = false;
     updated.auto_close = true;
     updated.full_resolution_screenshots = true;
-    // Read the diagnostic switch from its control: save_settings rebuilds the whole
-    // struct, so any control not read here reverts to the stored value and the toggle
-    // silently does nothing.
-    updated.diagnostic_logging =
-        SendMessageW(g_state->diagnostic_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    // Diagnostics are always on: a failure on a machine we cannot inspect must leave
+    // evidence behind, so there is no user switch for this.
+    updated.diagnostic_logging = true;
     try { xfx::SettingsStore::save(settings_path(), updated); }
     catch (...) {
         throw;
@@ -3896,7 +3989,7 @@ void adjust_console_height() {
         (std::min)(count, static_cast<LRESULT>(8))));
     RECT client{}; GetClientRect(hwnd, &client);
     const double scale = GetDpiForWindow(hwnd) / 96.0;
-    RECT desired{0, 0, client.right, static_cast<LONG>((56 + (shortcut_list_mode() ? kShortcutHeight : rows * kResultHeight) + kLayerStyleRowHeight + 22 +
+    RECT desired{0, 0, client.right, static_cast<LONG>((56 + (shortcut_list_mode() ? kShortcutHeight : rows * kResultHeight) + kLayerStyleRowHeight + (g_state->settings.show_slot_row ? kSlotRowHeight : 0) + 22 +
         g_state->settings_extent)*scale)};
     AdjustWindowRectEx(&desired, style, FALSE, GetWindowLongW(hwnd, GWL_EXSTYLE));
     const int height = desired.bottom - desired.top;
@@ -3957,7 +4050,9 @@ void layout_controls(HWND hwnd) {
         const RECT actual{origin.x,origin.y,origin.x+current.right-current.left,origin.y+current.bottom-current.top};
         if (EqualRect(&desired,&actual)) return;
         MoveWindow(child,left,top,width,height,FALSE);
-        if (child == g_state->light_theme || child == g_state->ime_mode_combo) fit_combo_face_height(child, height);
+        if (child == g_state->light_theme || child == g_state->ime_mode_combo ||
+            child == g_state->slot_row_key || child == g_state->result_digit_key)
+            fit_combo_face_height(child, height);
         if (!g_state->redraw_transaction) InvalidateRect(child,nullptr,FALSE);
     };
     const auto toolbar_bounds = toolbar_layout(hwnd);
@@ -3996,7 +4091,23 @@ void layout_controls(HWND hwnd) {
     place(g_state->preferences, toolbar_bounds.buttons[2]);
     const int footer = height - 22 - g_state->settings_extent;
     const int styles_top = footer - kLayerStyleRowHeight;
-    move(g_state->results, margin, 56, inner, (std::max)(kResultHeight,styles_top-56));
+    // Optional favourites strip sits directly above the style row.
+    const bool favourites_row = g_state->settings.show_slot_row;
+    const int slot_row_height = favourites_row ? kSlotRowHeight : 0;
+    const int slot_row_top = styles_top - slot_row_height;
+    move(g_state->results, margin, 56, inner,
+         (std::max)(kResultHeight, slot_row_top - 56));
+    if (favourites_row) {
+        for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+            const int left = margin + static_cast<int>(index) * inner / 9;
+            const int right = margin + static_cast<int>(index + 1) * inner / 9;
+            move(g_state->slot_row_buttons[index], left, slot_row_top + 4, right - left - 3, 28);
+            ShowWindow(g_state->slot_row_buttons[index], SW_SHOWNA);
+            apply_button_region(g_state->slot_row_buttons[index]);
+        }
+    } else {
+        for (HWND button : g_state->slot_row_buttons) ShowWindow(button, SW_HIDE);
+    }
     // Separate always-visible row below the shortcut/results area. Preserve
     // numeric 1-9 bindings and search results; compact labels have full tips.
     for (size_t index = 0; index < g_state->layer_style_buttons.size(); ++index) {
@@ -4026,9 +4137,19 @@ void layout_controls(HWND hwnd) {
     // and its own row on narrow ones so nothing overlaps.
     const int digit_y = narrow ? 164 : 106;
     setting(g_state->result_digit_checkbox, narrow ? 8 : 200, digit_y, narrow ? inner : inner - 200, 24);
-    const int diagnostic_y = digit_y + 28;
+    // Optional favourites strip + its key, on one row.
+    const int slotrow_y = digit_y + 28;
+    setting(g_state->slot_row_checkbox, 8, slotrow_y, narrow ? inner : 150, 24);
+    setting(g_state->slot_row_key, narrow ? 8 : 164, narrow ? slotrow_y + 28 : slotrow_y,
+            narrow ? 110 : 96, 26, 24);
+    setting(g_state->slot_row_hint, narrow ? 8 : 264, narrow ? slotrow_y + 56 : slotrow_y,
+            narrow ? inner : inner - 264, 24, 20);
+    // The result-digit modifier lives on its own row below the existing checkbox.
+    const int digitkey_y = slotrow_y + (narrow ? 84 : 28);
+    setting(g_state->result_digit_key, 8, digitkey_y, 110, 26, 24);
+    setting(g_state->result_digit_hint, 122, digitkey_y, inner - 122, 24, 20);
+    const int diagnostic_y = digitkey_y + 30;
     const int export_width = 76;
-    setting(g_state->diagnostic_checkbox, 8, diagnostic_y, inner - export_width - 4, 24);
     setting(g_state->export_log_button, inner - export_width, diagnostic_y, export_width, 24);
     const int update_y = diagnostic_y + 30;
     const bool update_in_settings = g_state->settings_extent >= update_y + 26;
@@ -4234,7 +4355,8 @@ void update_console_fonts(HWND hwnd) {
     g_state->font=font;g_state->slot_number_font=slot_font;g_state->status_font=status_font;
     EnumChildWindows(hwnd,[](HWND child,LPARAM)->BOOL{set_font(child);return TRUE;},0);
     if(IsWindow(g_state->status))SendMessageW(g_state->status,WM_SETFONT,reinterpret_cast<WPARAM>(g_state->status_important?font:status_font),TRUE);
-    for(HWND combo:{g_state->filter,g_state->light_theme,g_state->ime_mode_combo})if(IsWindow(combo)){
+    for(HWND combo:{g_state->filter,g_state->light_theme,g_state->ime_mode_combo,
+                     g_state->slot_row_key,g_state->result_digit_key})if(IsWindow(combo)){
         SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,dpi,96));
     }
     if(old_font)DeleteObject(old_font);if(old_small)DeleteObject(old_small);if(old_status)DeleteObject(old_status);
@@ -4409,6 +4531,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             create_control(hwnd, &g_state->layer_style_buttons[index], L"BUTTON", xfx::layer_styles[index].short_label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, kLayerStyleFirstId + static_cast<int>(index));
         }
+        // Second strip: nine user favourites, bound to modifier+1..9. This row is
+        // optional because it consumes vertical space the results list wants.
+        for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+            create_control(hwnd, &g_state->slot_row_buttons[index], L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kSlotRowFirstId + static_cast<int>(index));
+        }
         create_control(hwnd, &g_state->slot, L"BUTTON", L"快捷项", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kSlotId);
         create_control(hwnd, &g_state->refresh, L"BUTTON", L"刷新索引", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kRefreshId);
         create_control(hwnd, &g_state->capture, L"BUTTON", L"合成快照", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kCaptureId);
@@ -4444,22 +4572,43 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         for (const auto* label : {L"跟随", L"浅色", L"深色"})
             SendMessageW(g_state->light_theme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         SetWindowTheme(g_state->light_theme, L"", L"");
-        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo}) SetWindowSubclass(combo,combo_face_proc,0xB005,0);
-        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo}) {
+        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo,
+                          g_state->slot_row_key,g_state->result_digit_key})
+            SetWindowSubclass(combo,combo_face_proc,0xB005,0);
+        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo,
+                          g_state->slot_row_key,g_state->result_digit_key}) {
             SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,GetDpiForWindow(hwnd),96));
         }
         create_control(hwnd, &g_state->result_digit_checkbox, L"BUTTON",
                        L"数字键 1-9 直接应用搜索结果（小键盘除外）",
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kResultDigitId);
-        create_control(hwnd, &g_state->diagnostic_checkbox, L"BUTTON",
-                       L"记录诊断日志（遇到问题时勾选，便于排查）",
-                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kDiagnosticLogId);
         create_control(hwnd, &g_state->export_log_button, L"BUTTON", L"导出日志",
                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportLogId);
-        for (HWND checkbox : {g_state->result_digit_checkbox, g_state->diagnostic_checkbox})
+        create_control(hwnd, &g_state->slot_row_checkbox, L"BUTTON",
+                       L"显示第二行快捷栏 1-9",
+                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kSlotRowToggleId);
+        create_control(hwnd, &g_state->slot_row_key, L"COMBOBOX", L"快捷栏按键",
+                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                       CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kSlotRowKeyId);
+        for (const auto* label : {L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
+                                  L"Shift+数字", L"Ctrl+Alt+数字"})
+            SendMessageW(g_state->slot_row_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        create_control(hwnd, &g_state->result_digit_key, L"COMBOBOX", L"搜索结果按键",
+                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                       CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kResultDigitKeyId);
+        for (const auto* label : {L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
+                                  L"Shift+数字", L"Ctrl+Alt+数字"})
+            SendMessageW(g_state->result_digit_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        create_control(hwnd, &g_state->result_digit_hint, L"STATIC",
+                       L"数字 1-9 不可更改，只调整前面的按键",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kResultDigitHintId);
+        create_control(hwnd, &g_state->slot_row_hint, L"STATIC",
+                       L"应用于下方第二行 9 个快捷栏",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kSlotRowHintId);
+        for (HWND checkbox : {g_state->result_digit_checkbox, g_state->slot_row_checkbox})
             SetWindowTheme(checkbox, L"", L"");
         SetWindowSubclass(g_state->result_digit_checkbox,checkbox_face_proc,0xB008,0);
-        SetWindowSubclass(g_state->diagnostic_checkbox,checkbox_face_proc,0xB00A,0);
+        SetWindowSubclass(g_state->slot_row_checkbox,checkbox_face_proc,0xB00B,0);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
                        WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_CENTERIMAGE | SS_ENDELLIPSIS, kStatusId);
@@ -4485,12 +4634,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
         SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
                      static_cast<int>(g_state->settings.ime_mode), 0);
+        SendMessageW(g_state->slot_row_checkbox, BM_SETCHECK,
+                     g_state->settings.show_slot_row ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
+                     modifier_combo_index(g_state->settings.slot_row_modifier), 0);
+        SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
+                     modifier_combo_index(g_state->settings.result_digit_modifier), 0);
         SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
                      g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(g_state->diagnostic_checkbox, BM_SETCHECK,
-                 g_state->settings.diagnostic_logging ? BST_CHECKED : BST_UNCHECKED, 0);
-        SendMessageW(g_state->diagnostic_checkbox, BM_SETCHECK,
-                     g_state->settings.diagnostic_logging ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
         repaint_theme_windows();
         g_search_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
@@ -4557,7 +4708,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?196:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?330:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -4589,14 +4740,17 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
         info->ptMinTrackSize.x = MulDiv(360,GetDpiForWindow(hwnd),96);
-        info->ptMinTrackSize.y = MulDiv(114+kLayerStyleRowHeight+g_state->settings_extent,GetDpiForWindow(hwnd),96);
+        info->ptMinTrackSize.y = MulDiv(114+kLayerStyleRowHeight+g_state->settings_extent+
+        (g_state->settings.show_slot_row ? kSlotRowHeight : 0),GetDpiForWindow(hwnd),96);
         return 0;
     }
     case WM_MEASUREITEM: {
         auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
         if (measure->CtlID == kResultsId) measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;
         if (measure->CtlID == kFilterId || measure->CtlID == kLightThemeId ||
-            measure->CtlID == kImeModeId) measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
+            measure->CtlID == kImeModeId || measure->CtlID == kSlotRowKeyId ||
+            measure->CtlID == kResultDigitKeyId)
+            measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
         return TRUE;
     }
     case WM_DRAWITEM: {
@@ -4604,7 +4758,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         struct RestoreDrawDc {HDC dc;int saved;~RestoreDrawDc(){if(saved)RestoreDC(dc,saved);}} restore{draw->hDC,SaveDC(draw->hDC)};
         SelectObject(draw->hDC,g_state->font);
         if (draw->CtlID == kFilterId || draw->CtlID == kLightThemeId ||
-            draw->CtlID == kImeModeId) {
+            draw->CtlID == kImeModeId || draw->CtlID == kSlotRowKeyId ||
+            draw->CtlID == kResultDigitKeyId) {
             if (draw->itemState & ODS_COMBOBOXEDIT) {
                 IntersectClipRect(draw->hDC, draw->rcItem.left, draw->rcItem.top, draw->rcItem.right, draw->rcItem.bottom);
                 draw_combo_face(draw->hwndItem, draw->hDC);
@@ -4838,14 +4993,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             export_diagnostic_log();
             return 0;
         }
-        if (LOWORD(wparam) == kDiagnosticLogId && HIWORD(wparam) == BN_CLICKED) {
-            g_state->settings.diagnostic_logging =
-                SendMessageW(g_state->diagnostic_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            set_status(g_state->settings.diagnostic_logging
-                ? L"诊断日志已开启：出问题时请把 effect-console.log 发给开发者"
-                : L"诊断日志已关闭", true);
-            return 0;
-        }
         if (LOWORD(wparam) == kResultDigitId && HIWORD(wparam) == BN_CLICKED) {
             g_state->settings.result_digit_shortcut =
                 SendMessageW(g_state->result_digit_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -4855,6 +5002,52 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
         if (LOWORD(wparam) == kDictionaryId) { edit_dictionary(); return 0; }
+        if (LOWORD(wparam) == kSlotRowToggleId && HIWORD(wparam) == BN_CLICKED) {
+            g_state->settings.show_slot_row =
+                SendMessageW(g_state->slot_row_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
+            catch (...) { set_status(L"快捷栏开关未能保存"); return 0; }
+            layout_controls(hwnd);
+            adjust_console_height();
+            set_status(g_state->settings.show_slot_row
+                ? L"已显示第二行快捷栏" : L"已隐藏第二行快捷栏", true);
+            return 0;
+        }
+        if ((LOWORD(wparam) == kSlotRowKeyId || LOWORD(wparam) == kResultDigitKeyId) &&
+            HIWORD(wparam) == CBN_SELCHANGE) {
+            const HWND combo = LOWORD(wparam) == kSlotRowKeyId ? g_state->slot_row_key
+                                                                : g_state->result_digit_key;
+            const auto choice = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            static const wchar_t* kModifierText[] = {L"", L"Ctrl", L"Alt", L"Shift", L"Ctrl+Alt"};
+            if (choice < 0 || choice > 4) return 0;
+            auto& target = LOWORD(wparam) == kSlotRowKeyId
+                ? g_state->settings.slot_row_modifier
+                : g_state->settings.result_digit_modifier;
+            target = kModifierText[choice];
+            // The two shortcuts must not be the same, or one of them can never fire.
+            auto& other = LOWORD(wparam) == kSlotRowKeyId
+                ? g_state->settings.result_digit_modifier
+                : g_state->settings.slot_row_modifier;
+            if (target == other) {
+                set_status(L"两组快捷键不能使用相同按键，请换一个组合");
+                // Put the selection back to the stored value.
+                const int restore_index = LOWORD(wparam) == kSlotRowKeyId
+                    ? [&] {
+                        for (int i = 0; i < 5; ++i)
+                            if (std::wstring(kModifierText[i]) == g_state->settings.slot_row_modifier) return i;
+                        return 0; }()
+                    : [&] {
+                        for (int i = 0; i < 5; ++i)
+                            if (std::wstring(kModifierText[i]) == g_state->settings.result_digit_modifier) return i;
+                        return 0; }();
+                SendMessageW(combo, CB_SETCURSEL, restore_index, 0);
+                return 0;
+            }
+            try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
+            catch (...) { set_status(L"快捷键设置未能保存"); return 0; }
+            set_status(L"快捷键已更新", true);
+            return 0;
+        }
         if (LOWORD(wparam) == kImeModeId && HIWORD(wparam) == CBN_SELCHANGE) {
             const auto choice = static_cast<int>(SendMessageW(g_state->ime_mode_combo, CB_GETCURSEL, 0, 0));
             if (choice < 0 || choice > 3) return 0;
@@ -4895,7 +5088,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 196 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 330 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
@@ -4960,10 +5153,23 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
         if ((LOWORD(wparam) == kFilterId || LOWORD(wparam) == kLightThemeId ||
-             LOWORD(wparam) == kImeModeId) && HIWORD(wparam) == CBN_DROPDOWN) {
+             LOWORD(wparam) == kImeModeId || LOWORD(wparam) == kSlotRowKeyId ||
+             LOWORD(wparam) == kResultDigitKeyId) && HIWORD(wparam) == CBN_DROPDOWN) {
             theme_combo_popup(LOWORD(wparam) == kFilterId ? g_state->filter
                             : LOWORD(wparam) == kLightThemeId ? g_state->light_theme
-                            : g_state->ime_mode_combo);
+                            : LOWORD(wparam) == kImeModeId ? g_state->ime_mode_combo
+                            : LOWORD(wparam) == kSlotRowKeyId ? g_state->slot_row_key
+                            : g_state->result_digit_key);
+            return 0;
+        }
+        if (LOWORD(wparam) >= kSlotRowFirstId &&
+            LOWORD(wparam) < kSlotRowFirstId + 9 && HIWORD(wparam) == BN_CLICKED) {
+            const int index = LOWORD(wparam) - kSlotRowFirstId;
+            if (GetKeyState(VK_SHIFT) & 0x8000) assign_slot(index);
+            else {
+                const auto reply = execute_slot(index);
+                if (!reply.pending) set_status(utf8_to_wide(reply.message.c_str()), reply.succeeded);
+            }
             return 0;
         }
         if (LOWORD(wparam) == kSlotId && HIWORD(wparam) == BN_CLICKED) {

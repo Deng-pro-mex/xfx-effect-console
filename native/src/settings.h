@@ -31,9 +31,16 @@ struct Settings {
     // the numeric keypad is always excluded from this shortcut.
     bool result_digit_shortcut = true;
     ImeMode ime_mode = ImeMode::Restore;
-    // Verbose diagnostic logging. Off by default so normal use writes only a small
-    // error log; the settings page can turn it on when a problem must be reported
-    // from another machine.
+    // Optional nine-button favourites strip under the results list.
+    bool show_slot_row = false;
+    // Key that runs favourites (modifier+1..9). Empty means Ctrl.
+    std::wstring slot_row_modifier = L"Ctrl";
+    // Key that applies the Nth visible result (modifier+1..9). Empty means none.
+    std::wstring result_digit_modifier = L"";
+    // Text shown in each of the nine favourites buttons.
+    std::array<std::wstring, 9> slot_button_labels{};
+    // Diagnostics are always on and not user configurable; the flag is kept so an
+    // imported older settings file still parses.
     bool diagnostic_logging = true;
     // Empty retains the existing product Capture directory for upgrades.
     std::wstring capture_directory;
