@@ -567,6 +567,40 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--apply-script-shape") {
+            // Applying an effect must go through a script that reports a machine-readable
+            // result and never calls alert(): an alert is AE's own modal dialog, and on
+            // the first apply of a session that is exactly the popup the user reported.
+            for (const wchar_t* match : {L"ADBE Gaussian Blur 2", L"ADBE Tint"}) {
+                const auto script = xfx::script_apply_effect(wide_to_utf8(match));
+                assert(script.find("alert(") == std::string::npos);
+                assert(script.find("confirm(") == std::string::npos);
+                assert(script.find("prompt(") == std::string::npos);
+                assert(script.find("(function () {") != std::string::npos);
+                assert(script.find("beginUndoGroup") != std::string::npos);
+                assert(script.find("endUndoGroup") != std::string::npos);
+                // The result contract the runner parses.
+                assert(script.find("OK\\t") != std::string::npos);
+                assert(script.find("ERROR\\t") != std::string::npos);
+                assert(script.find("PARTIAL\\t") != std::string::npos);
+                // The matchName is embedded, quoted, and cannot break out of the literal.
+                assert(script.find(std::string(match, match + wcslen(match))) != std::string::npos);
+            }
+            // An identifier containing a quote must not be able to escape the string.
+            const auto hostile = xfx::script_apply_effect("ADBE \"); alert(1); //");
+            // A quote in the identifier must be escaped, so it can only appear as \" in
+            // the generated literal - never as a bare closing quote followed by code.
+            assert(hostile.find("\\\"") != std::string::npos);
+            const size_t first_alert = hostile.find("alert(");
+            if (first_alert != std::string::npos) {
+                // Any literal "alert(" may only appear inside a quoted string, never as code.
+                const size_t escaped = hostile.rfind("\\\"", first_alert);
+                assert(escaped != std::string::npos);
+            }
+            std::cout << "PASS apply scripts are silent, undo-wrapped and report a status\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--menu-row-bind") {
             // The results context menu carries a 第二行快捷栏 submenu whose items are
             // numbered 70+slot. Those numbers must bind the row slot - not fall through

@@ -41,11 +41,13 @@ void paint_button(HWND button, HDC dc, const InputState& state) {
         Gdiplus::GraphicsPath clip;rounded_path(clip,{1,1,static_cast<float>(rect.right-2),static_cast<float>(rect.bottom-2)},radius);graphics.SetClip(&clip);
         for(const auto& wave:found->second) {
             const double t=(std::min)(1.0,(GetTickCount64()-wave.started)/700.0);
-            const float radius=static_cast<float>(std::hypot((std::max)(wave.origin.x,rect.right-wave.origin.x),
+            // Distinct from the corner radius above on purpose: this one is the ripple's
+            // growing extent, and shadowing the other made the two easy to mix up.
+            const float ripple_radius=static_cast<float>(std::hypot((std::max)(wave.origin.x,rect.right-wave.origin.x),
                 (std::max)(wave.origin.y,rect.bottom-wave.origin.y))*(1-std::pow(1-t,3)));
             const auto color=primary?palette.selected_text:palette.accent;
             Gdiplus::SolidBrush ink(Gdiplus::Color(static_cast<BYTE>(85*(1-t)),GetRValue(color),GetGValue(color),GetBValue(color)));
-            graphics.FillEllipse(&ink,wave.origin.x-radius,wave.origin.y-radius,radius*2,radius*2);
+            graphics.FillEllipse(&ink,wave.origin.x-ripple_radius,wave.origin.y-ripple_radius,ripple_radius*2,ripple_radius*2);
         }
     }
     if (state.font) SelectObject(dc, state.font);

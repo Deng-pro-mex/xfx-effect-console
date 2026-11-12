@@ -39,10 +39,12 @@ std::wstring hex_hash(std::uint64_t value) {
 }
 
 fs::path configured_cache_directory() {
-    wchar_t value[32768] = {};
-    const DWORD length = GetEnvironmentVariableW(L"XFX_THUMBNAIL_CACHE_DIR", value,
-        static_cast<DWORD>(std::size(value)));
-    if (length && length < std::size(value)) return fs::path(value, value + length);
+    // Heap, not stack: a 64 KB local made this function's frame 66060 bytes (C6262), and
+    // it is called from code paths that already run close to the default stack budget.
+    std::vector<wchar_t> value(32768, L'\0');
+    const DWORD length = GetEnvironmentVariableW(L"XFX_THUMBNAIL_CACHE_DIR", value.data(),
+        static_cast<DWORD>(value.size()));
+    if (length && length < value.size()) return fs::path(value.data(), value.data() + length);
 
     wchar_t local_app_data[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local_app_data))) {
