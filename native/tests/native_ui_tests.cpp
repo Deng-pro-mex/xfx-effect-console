@@ -591,6 +591,43 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-real-cursor") {
+            // Production drag reads GetCursorPos. Every other drag test swaps that out, so
+            // none of them prove the shipped path. This one moves the real cursor.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.row_slots[7].clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            assert(IsWindowVisible(g_state->slot_row_buttons[7]));
+            POINT saved{};
+            assert(GetCursorPos(&saved));
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[7], &cell));
+            // Real cursor to the middle of strip cell 8, then report a move. The handler is
+            // expected to ignore the reported coordinates and follow the cursor.
+            assert(SetCursorPos((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2));
+            const POINT stale{1, 1};
+            SendMessageW(g_state->results, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(stale.x, stale.y));
+            assert(g_state->result_drag_target == 7);
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(stale.x, stale.y));
+            SetCursorPos(saved.x, saved.y);
+            pump();
+            assert(!g_state->settings.row_slots[7].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[7] ==
+                g_state->settings.row_slots[7]);
+            std::cout << "PASS dragging with the real cursor binds strip cell 8\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-release-away") {
             // A real drag can end without the list ever seeing WM_LBUTTONUP: the release
             // goes to whatever window is under the cursor. The poll timer is what catches
