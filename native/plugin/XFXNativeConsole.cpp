@@ -124,12 +124,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.4.0";
+constexpr char kProductVersion[] = "1.4.1";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 48;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 236;
+constexpr int kSettingsHeight = 282;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -3399,11 +3399,16 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             // in the corner, label under it. Anything else makes the two rows look like
             // they belong to different tools.
             const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            // Same hover treatment the toolbar buttons use, so the strip feels alive.
+            const auto hovered_entry = g_state->button_hovers.find(
+                g_state->slot_row_buttons[index]);
+            const bool hovered = hovered_entry != g_state->button_hovers.end() &&
+                hovered_entry->second.hovered;
             RECT card = draw->rcItem;
             card.left += ui_px(1); card.right -= ui_px(1);
             xfx::paint_round_rect(draw->hDC, card,
-                selected ? colors().selected : colors().surface,
-                static_cast<float>(ui_px(3)),
+                selected ? colors().selected : hovered ? colors().button : colors().surface,
+                static_cast<float>(ui_px(4)),
                 selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
             RECT number = card;
             number.left += ui_px(5); number.top += ui_px(3);
@@ -4104,8 +4109,11 @@ void adjust_console_height() {
     const HWND hwnd = GetParent(g_state->search);
     const DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
     const LRESULT count = SendMessageW(g_state->results, LB_GETCOUNT, 0, 0);
-    const int rows = shortcut_list_mode() ? 1 : static_cast<int>((std::max)(static_cast<LRESULT>(1),
-        (std::min)(count, static_cast<LRESULT>(8))));
+    // The settings page hides the list, so it must not reserve result-row height.
+    const int rows = g_state->settings_visible ? 0
+        : shortcut_list_mode() ? 1
+        : static_cast<int>((std::max)(static_cast<LRESULT>(1),
+            (std::min)(count, static_cast<LRESULT>(8))));
     RECT client{}; GetClientRect(hwnd, &client);
     const double scale = GetDpiForWindow(hwnd) / 96.0;
     RECT desired{0, 0, client.right, static_cast<LONG>((56 + (shortcut_list_mode() ? kShortcutHeight : rows * kResultHeight) + kLayerStyleRowHeight + (g_state->settings.show_slot_row ? kSlotRowHeight : 0) + 22 +
@@ -4264,7 +4272,8 @@ void layout_controls(HWND hwnd) {
     const int hint_w = narrow ? 0 : 132;
     const int field_w = inner - pad * 2 - (narrow ? 0 : 118) - (narrow ? 0 : hint_w);
     const int key_w = narrow ? inner - pad * 2 : 82;
-    int cursor = 8;
+    // Extra top inset keeps the page clear of the toolbar instead of starting flush.
+    int cursor = 18;
     const auto row_height = [&](int height) {
         const int y = cursor;
         cursor += height + row_gap;
@@ -4811,7 +4820,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         layout_controls(hwnd);
         const HWND animated_buttons[] = {g_state->capture, g_state->slot, g_state->preferences,
             g_state->refresh, g_state->dictionary, g_state->hotkey_save,
-            g_state->import_settings, g_state->export_settings, g_state->export_log_button};
+            g_state->import_settings, g_state->export_settings, g_state->export_log_button,
+            g_state->slot_row_buttons[0], g_state->slot_row_buttons[1], g_state->slot_row_buttons[2],
+            g_state->slot_row_buttons[3], g_state->slot_row_buttons[4], g_state->slot_row_buttons[5],
+            g_state->slot_row_buttons[6], g_state->slot_row_buttons[7], g_state->slot_row_buttons[8]};
         for (HWND button : animated_buttons) {
             if (SetWindowSubclass(button, button_hover_proc, kButtonHoverSubclassId, 0))
                 g_state->button_hovers.emplace(button, ButtonHoverState{});
@@ -4865,7 +4877,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?300:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?344:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -5249,7 +5261,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 300 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 344 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
@@ -5437,6 +5449,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         const auto px = [dpi](int value){return MulDiv(value,dpi,96);};
         const RECT search_area = toolbar_layout(hwnd).search_surface;
         xfx::paint_round_rect(dc,search_area,colors().search,static_cast<float>(px(4)),GetFocus()==g_state->search?colors().accent:colors().divider);
+        // Hairlines between the settings groups. They sit in the gaps between rows, so
+        // no control paints over them, and they give the page the same quiet rhythm the
+        // search panel has instead of a wall of stacked controls.
+        if (g_state->settings_visible) {
+            const int pad = px(12);
+            const int separator_y = px(56) + px(28) + px(10);
+            for (int line = 0; line < 2; ++line) {
+                const int y = separator_y + line * (px(28) * 2 + px(10) * 2 + px(14));
+                if (y > client.bottom - px(28)) break;
+                RECT divider{pad, y, client.right - pad, y + 1};
+                FillRect(dc, &divider, g_state->input_brush);
+            }
+        }
         Gdiplus::Graphics graphics(dc);graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.TranslateTransform(static_cast<float>(px(23)),static_cast<float>(px(28)));graphics.ScaleTransform(dpi/96.0f,dpi/96.0f);
         Gdiplus::Pen pen(vector_color(colors().icon),1.5f);pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);
