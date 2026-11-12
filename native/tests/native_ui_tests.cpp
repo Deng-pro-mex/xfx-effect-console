@@ -591,6 +591,40 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-release-away") {
+            // A real drag can end without the list ever seeing WM_LBUTTONUP: the release
+            // goes to whatever window is under the cursor. The poll timer is what catches
+            // it, so exercise exactly that path.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.row_slots[6].clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            assert(IsWindowVisible(g_state->slot_row_buttons[6]));
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[6], &cell));
+            g_test_drag_cursor = POINT{cell.left + 6, cell.top + 6};
+            g_test_drag_button_held = false;   // the button is already up
+            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            pump();
+            assert(!g_state->result_drag_armed);
+            assert(!g_state->settings.row_slots[6].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[6] ==
+                g_state->settings.row_slots[6]);
+            std::cout << "PASS a drag released outside the list still binds to the strip\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--slot-row-menu") {
             show_console();
             g_state->settings.show_slot_row = true;

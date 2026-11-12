@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.10";
+constexpr char kProductVersion[] = "1.5.11";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -145,6 +145,8 @@ constexpr int kToolbarCenterY = 28;
 constexpr int kToolbarButtonSize = 36;
 constexpr int kToolbarGap = 4;
 constexpr UINT_PTR kDragTimerId = 0xD001;
+// Polls the real cursor while a result is being dragged to the second strip.
+constexpr UINT_PTR kResultDragTimerId = 0xD002;
 constexpr UINT kDragHoldMs = 280;
 constexpr int kDragEdge = 14;
 constexpr UINT_PTR kResultTooltipId = 0x7F01;
@@ -1742,6 +1744,37 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         // reported position, and repaint the cells directly. They are ownerdraw child
         // windows, so invalidating the parent never repainted them.
         update_result_drag_target();
+        // A slow drag can move without generating another WM_MOUSEMOVE for the list
+        // (the pointer crosses a child window and the moves go there). Poll while the
+        // button is held so the highlight keeps up and the release resolves.
+        SetTimer(hwnd, kResultDragTimerId, 30, nullptr);
+        return 0;
+    }
+    if (message == WM_TIMER && wparam == kResultDragTimerId) {
+        if (!g_state->result_drag_armed) { KillTimer(hwnd, kResultDragTimerId); return 0; }
+        if (!drag_button_is_held()) {
+            // The button came up without the list seeing WM_LBUTTONUP (the release went to
+            // another window). Finish the drop here instead of losing the drag.
+            KillTimer(hwnd, kResultDragTimerId);
+            update_result_drag_target();
+            const int drop_target = g_state->result_drag_target;
+            const int drag_row = g_state->result_drag_row;
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            g_state->result_drag_target = -1;
+            repaint_slot_row_cells();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (g_state->result_click_redraw_held) {
+                g_state->result_click_redraw_held = false;
+                if (IsWindow(hwnd)) SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+            }
+            g_state->result_click_pending = false;
+            g_state->result_click_row = -1;
+            g_state->result_click_action = ResultAction::None;
+            if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
+            return 0;
+        }
+        update_result_drag_target();
         return 0;
     }
     if (message == WM_MOUSEMOVE) {
@@ -1838,6 +1871,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             g_state->result_drag_target = -1;
+            KillTimer(hwnd, kResultDragTimerId);
             repaint_slot_row_cells();
             if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
             else if (drop_target < 0 && drag_row >= 0 && !IsWindowVisible(g_state->slot_row_buttons[0]))
@@ -1941,6 +1975,19 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     if ((message == WM_CAPTURECHANGED || message == WM_CANCELMODE) &&
         (g_state->result_click_pending || g_state->result_drag_armed)) {
         if (g_state->result_drag_armed) {
+            // Another window stole the capture mid-drag. That happens for the taskbar,
+            // IME windows and automation tools - and dropping on the strip at that moment
+            // must still bind, so resolve the drop before clearing the state.
+            update_result_drag_target();
+            const int stolen_target = g_state->result_drag_target;
+            const int stolen_row = g_state->result_drag_row;
+            if (stolen_target >= 0 && stolen_row >= 0 && !g_state->result_click_pending) {
+                g_state->result_drag_armed = false;
+                g_state->result_drag_row = -1;
+                g_state->result_drag_target = -1;
+                repaint_slot_row_cells();
+                assign_row_slot_dragged(stolen_target, stolen_row);
+            }
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             if (g_state->result_drag_target >= 0) {
