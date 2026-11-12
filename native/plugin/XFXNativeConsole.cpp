@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.32";
+constexpr char kProductVersion[] = "1.5.33";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -280,13 +280,22 @@ std::string wide_to_ansi(const std::wstring& value) {
     return result;
 }
 
+// A 32 KB stack buffer in a helper that runs on every repaint costs stack, and MSVC's
+// analyzer flagged ten of them (C6262, up to 68 KB frames). These APIs need a writable
+// wide buffer, not a fixed one: hand out heap storage with the same capacity.
+constexpr size_t kWidePathCapacity = 32768;
+std::vector<wchar_t> wide_buffer(size_t capacity = kWidePathCapacity) {
+    return std::vector<wchar_t>(capacity, L'\0');
+}
+
 std::filesystem::path settings_path() {
 #ifdef XFX_CONSOLE_TEST
     if (!g_test_settings_path.empty()) return g_test_settings_path;
 #endif
-    wchar_t profile[32768] = {};
-    const DWORD length = GetEnvironmentVariableW(L"XFX_NATIVE_DATA_DIR", profile, 32768);
-    if (length && length < 32768) return fs::path(profile) / L"settings.ini";
+    auto profile = wide_buffer();
+    const DWORD length = GetEnvironmentVariableW(L"XFX_NATIVE_DATA_DIR", profile.data(),
+        static_cast<DWORD>(profile.size()));
+    if (length && length < profile.size()) return fs::path(profile.data()) / L"settings.ini";
     wchar_t documents[MAX_PATH] = {};
     SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, documents);
     return fs::path(documents) / L"LoYoi" / L"XFXNative" / L"settings.ini";
@@ -294,9 +303,9 @@ std::filesystem::path settings_path() {
 
 std::wstring after_effects_root() {
     // The running host is authoritative, including custom installs and multiple AE versions.
-    wchar_t host_path[32768] = {};
-    if (GetModuleFileNameW(nullptr, host_path, 32768)) {
-        return fs::path(host_path).parent_path().wstring();
+    auto host_path = wide_buffer();
+    if (GetModuleFileNameW(nullptr, host_path.data(), static_cast<DWORD>(host_path.size()))) {
+        return fs::path(host_path.data()).parent_path().wstring();
     }
     HKEY key = nullptr;
     wchar_t plugin_path[1024] = {};
@@ -438,10 +447,11 @@ fs::path aliases_path() {
     if (!g_test_settings_path.empty()) return g_test_settings_path.parent_path() / L"XFXNativeConsole.aliases.tsv";
 #endif
     HMODULE module = nullptr;
-    wchar_t filename[32768] = {};
+    auto filename = wide_buffer();
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&g_basic), &module) && GetModuleFileNameW(module, filename, 32768)) {
-        return fs::path(filename).parent_path() / L"XFXNativeConsole.aliases.tsv";
+        reinterpret_cast<LPCWSTR>(&g_basic), &module) &&
+        GetModuleFileNameW(module, filename.data(), static_cast<DWORD>(filename.size()))) {
+        return fs::path(filename.data()).parent_path() / L"XFXNativeConsole.aliases.tsv";
     }
     return fs::path(after_effects_root()) / L"Plug-ins" / L"XFXNativeConsole.aliases.tsv";
 }
@@ -1242,7 +1252,7 @@ void set_status(const std::wstring& message, bool success = false) {
 void set_font(HWND control) {
     if (g_state && g_state->font && control) SendMessageW(control, WM_SETFONT,
                                                             reinterpret_cast<WPARAM>(g_state->font), TRUE);
-    if (g_state && control == g_state->search)
+    if (g_state && control && control == g_state->search)
         SendMessageW(control, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
 }
 
@@ -1534,8 +1544,13 @@ int search_line_height(HWND hwnd) {
     const HWND search = g_state ? g_state->search : nullptr;
     HDC dc = GetDC(search ? search : hwnd);
     if (!dc) return MulDiv(xfx::kUiBodyPixels, GetDpiForWindow(hwnd), 96);
-    const auto font = search ? reinterpret_cast<HFONT>(SendMessageW(search, WM_GETFONT, 0, 0)) : g_state->font;
-    const auto previous = SelectObject(dc, font ? font : g_state->font);
+    const HFONT state_font = g_state ? g_state->font : nullptr;
+    const auto font = search ? reinterpret_cast<HFONT>(SendMessageW(search, WM_GETFONT, 0, 0)) : state_font;
+    // A device context always has a usable font: fall back to the stock one rather than
+    // selecting a null handle, which SelectObject rejects.
+    const HFONT measured_font = font ? font : state_font ? state_font
+        : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    const auto previous = SelectObject(dc, measured_font);
     TEXTMETRICW metrics{};
     const bool measured = GetTextMetricsW(dc, &metrics) != FALSE;
     SelectObject(dc, previous);
@@ -2459,10 +2474,11 @@ void refresh_catalog() {
     g_state->base_catalog = scan_catalog();
     rebuild_customized_catalog();
     // Optional support diagnostic, useful for validating a host without touching user data.
-    wchar_t report_path[32768] = {};
-    const DWORD report_length = GetEnvironmentVariableW(L"XFX_NATIVE_SMOKE_REPORT", report_path, 32768);
-    if (report_length && report_length < 32768) {
-        std::ofstream report(fs::path(report_path), std::ios::binary);
+    auto report_path = wide_buffer();
+    const DWORD report_length = GetEnvironmentVariableW(L"XFX_NATIVE_SMOKE_REPORT", report_path.data(),
+        static_cast<DWORD>(report_path.size()));
+    if (report_length && report_length < report_path.size()) {
+        std::ofstream report(fs::path(report_path.data()), std::ios::binary);
         report << "catalog=" << g_state->catalog.size() << "\n";
         for (const auto* query : {L"高斯模糊", L"gaosimohu", L"gsmh", L"saoguang", L"sg"}) {
             const auto matches = g_state->engine.search(query);
@@ -3329,23 +3345,24 @@ void save_capture_as() {
     const auto source = selected_capture();
     if (source.empty()) return;
     ModalGuard modal;
-    wchar_t filename[32768] = L"快照.png";
+    auto filename = wide_buffer();
+    wcscpy_s(filename.data(), filename.size(), L"快照.png");
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = g_state->gallery_window;
-    dialog.lpstrFile = filename; dialog.nMaxFile = 32768;
+    dialog.lpstrFile = filename.data(); dialog.nMaxFile = static_cast<DWORD>(filename.size());
     dialog.lpstrFilter = L"PNG 透明图片 (*.png)\0*.png\0JPEG 白底图片 (*.jpg)\0*.jpg\0";
     dialog.lpstrDefExt = L"png";
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&dialog)) return;
     const bool jpeg = dialog.nFilterIndex == 2;
-    fs::path target(filename);
+    fs::path target(filename.data());
     target.replace_extension(jpeg ? L".jpg" : L".png");
     std::error_code error;
     if (fs::equivalent(source, target, error) && !error) {
         show_message_box(g_state->gallery_window, L"这张图片已经保存在该路径。", L"快照", MB_OK);
         return;
     }
-    if (target != fs::path(filename) && fs::exists(target, error) &&
+    if (target != fs::path(filename.data()) && fs::exists(target, error) &&
         show_message_box(g_state->gallery_window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
             L"确认替换图片", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
     const bool success = xfx::export_capture(source, target, jpeg);
@@ -3704,8 +3721,8 @@ void export_diagnostic_log() {
         out << "== 版本 ==\r\n";
         out << "插件版本: " << kProductVersion << "\r\n";
         out << "诊断日志开关: " << (g_state->settings.diagnostic_logging ? "开启" : "关闭") << "\r\n";
-        wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, 32768);
-        out << "宿主程序: " << wide_to_utf8(exe) << "\r\n";
+        auto exe = wide_buffer(); GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
+        out << "宿主程序: " << wide_to_utf8(exe.data()) << "\r\n";
         out << "\r\n== 系统 ==\r\n";
         // RtlGetVersion reports the real build even when the app has no manifest entry;
         // GetVersionEx would report a compatibility-shimmed value.
@@ -4335,12 +4352,13 @@ void show_result_menu(HWND hwnd, LPARAM location) {
     handle_slot_command(command);
     if (command >= 70 && command <= 78) assign_row_slot(command - 70);
     if (command == 4) {
-        wchar_t filename[32768] = {};
+        auto filename = wide_buffer();
         OPENFILENAMEW dialog{sizeof(dialog)}; dialog.hwndOwner = hwnd;
-        dialog.lpstrFile = filename; dialog.nMaxFile = 32768;
+        dialog.lpstrFile = filename.data(); dialog.nMaxFile = static_cast<DWORD>(filename.size());
         dialog.lpstrFilter = L"AE 动画预设 (*.ffx)\0*.ffx\0";
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-        if (GetOpenFileNameW(&dialog)) persist_settings_update([&](xfx::Settings& settings) { settings.overrides[key] = filename; });
+        if (GetOpenFileNameW(&dialog))
+            persist_settings_update([&](xfx::Settings& settings) { settings.overrides[key] = filename.data(); });
     }
     if (command) populate_results();
 }
@@ -4615,7 +4633,7 @@ void draw_toolbar_icon(HDC dc,const RECT& rect,int id) {
         for(int y=0;y<3;++y)for(int x=0;x<3;++x)g.DrawRectangle(&pen,-8.25f+x*6,-8.25f+y*6,4.5f,4.5f);
     } else if(id==kPreferencesId) {
         Gdiplus::PointF points[32];
-        for(int n=0;n<32;++n){const float angle=(n-.5f)*3.14159265f/16,r=n%4==1 || n%4==2?8.25f:6.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
+        for(int n=0;n<32;++n){const float angle=(n-.5f)*3.14159265f/16,r=(n%4==1 || n%4==2)?8.25f:6.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
         g.DrawPolygon(&pen,points,32);g.DrawEllipse(&pen,-2.75f,-2.75f,5.5f,5.5f);
     }
 }
@@ -5527,7 +5545,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                     graphics.DrawLine(&pen,-7.0f,3.0f,0.0f,-4.0f);graphics.DrawLine(&pen,0.0f,-4.0f,7.0f,3.0f);
                 } else if(action==ResultAction::Favorite) {
                     Gdiplus::PointF points[10];
-                    for(int n=0;n<10;++n){const float angle=-1.5707963f+n*3.14159265f/5,r=n%2?3.5f:8.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
+                    for(int n=0;n<10;++n){const float angle=-1.5707963f+n*3.14159265f/5,r=(n%2)?3.5f:8.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
                     if(item && contains_key(g_state->settings.favorites,item_key(*item))){Gdiplus::SolidBrush fill(vector_color(icon_color));graphics.FillPolygon(&fill,points,10);}
                     else graphics.DrawPolygon(&pen,points,10);
                 } else {
@@ -6206,16 +6224,16 @@ xfx::BridgeCompletion prepare_current_snapshot(fs::path& target) {
         set_status(L"快照失败：" + utf8_to_wide(composition.reply.message.c_str()));
         return bridge_script_result(composition.reply, L"");
     }
-    wchar_t filename[32768]{};
+    auto filename = wide_buffer();
     const auto initial_name = xfx::snapshot_png_filename(composition.name);
-    wcscpy_s(filename, initial_name.c_str());
+    wcscpy_s(filename.data(), filename.size(), initial_name.c_str());
     HWND owner = IsWindowVisible(g_state->window) ? g_state->window : GetForegroundWindow();
     DWORD owner_process = 0;
     GetWindowThreadProcessId(owner, &owner_process);
     if (owner_process != GetCurrentProcessId()) owner = nullptr;
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = owner;
-    dialog.lpstrFile = filename; dialog.nMaxFile = 32768;
+    dialog.lpstrFile = filename.data(); dialog.nMaxFile = static_cast<DWORD>(filename.size());
     dialog.lpstrTitle = L"保存当前合成快照";
     dialog.lpstrFilter = L"PNG 透明图片 (*.png)\0*.png\0";
     dialog.lpstrDefExt = L"png";
@@ -6230,7 +6248,7 @@ xfx::BridgeCompletion prepare_current_snapshot(fs::path& target) {
         set_status(L"已取消保存快照");
         return {false, 0, "cancelled", wide_to_utf8(L"已取消保存快照")};
     }
-    target = fs::path(filename);
+    target = fs::path(filename.data());
     if (CompareStringOrdinal(target.extension().c_str(), -1, L".png", -1, TRUE) != CSTR_EQUAL) {
         target += L".png";
         if (fs::exists(target) && show_message_box(owner,
@@ -6288,16 +6306,18 @@ xfx::BridgeCompletion export_current_frame() {
     fs::path target;
     bool jpeg = choice == 2;
     if (choice != 3) {
-        wchar_t filename[32768] = L"快照.png";
+        auto filename = wide_buffer();
+        wcscpy_s(filename.data(), filename.size(), L"快照.png");
         OPENFILENAMEW dialog{sizeof(dialog)};
-        dialog.hwndOwner = g_state->window; dialog.lpstrFile = filename; dialog.nMaxFile = 32768;
+        dialog.hwndOwner = g_state->window; dialog.lpstrFile = filename.data();
+        dialog.nMaxFile = static_cast<DWORD>(filename.size());
         dialog.lpstrFilter = L"PNG 透明图片 (*.png)\0*.png\0JPEG 白底图片 (*.jpg)\0*.jpg\0";
         dialog.nFilterIndex = jpeg ? 2 : 1; dialog.lpstrDefExt = jpeg ? L"jpg" : L"png";
         dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
         if (!GetSaveFileNameW(&dialog)) return {false, 0, "cancelled", wide_to_utf8(L"操作已取消")};
         jpeg = dialog.nFilterIndex == 2;
-        target = filename; target.replace_extension(jpeg ? L".jpg" : L".png");
-        if (target != fs::path(filename) && fs::exists(target) &&
+        target = filename.data(); target.replace_extension(jpeg ? L".jpg" : L".png");
+        if (target != fs::path(filename.data()) && fs::exists(target) &&
             show_message_box(g_state->window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
                 L"确认替换图片", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
             return {false, 0, "cancelled", wide_to_utf8(L"操作已取消")};
@@ -6307,7 +6327,8 @@ xfx::BridgeCompletion export_current_frame() {
     if (FAILED(CoCreateGuid(&temporary_id)))
         return {false, 0, "export_error", wide_to_utf8(L"无法创建临时导出文件")};
     wchar_t temporary_name[40]{};
-    StringFromGUID2(temporary_id, temporary_name, 40);
+    if (!StringFromGUID2(temporary_id, temporary_name, 40))
+        return {false, 0, "export_error", wide_to_utf8(L"无法创建临时导出文件")};
     const auto temporary_directory = fs::temp_directory_path() / (L"XFXExport-" + std::wstring(temporary_name));
     if (!fs::create_directory(temporary_directory))
         return {false, 0, "export_error", wide_to_utf8(L"无法创建临时导出目录")};
