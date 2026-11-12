@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.12";
+constexpr char kProductVersion[] = "1.5.13";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -3673,14 +3673,14 @@ void assign_row_slot_dragged(int slot, int row) {
     const LRESULT data = SendMessageW(g_state->results, LB_GETITEMDATA, row, 0);
     if (data == LB_ERR || data == 0) { set_status(L"请先选择要绑定的效果"); return; }
     const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
-    if (!item || item->item_type == L"empty") { set_status(L"不能把空位绑定到快捷栏"); return; }
+    if (!item || item->item_type == L"empty") { set_status(L"这一行是空位，请先搜索并选中一个效果"); return; }
     auto updated = g_state->settings;
     updated.row_slots[static_cast<size_t>(slot)] = item_key(*item);
     try { xfx::SettingsStore::save(settings_path(), updated); }
-    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    catch (...) { set_status(L"第二行快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
     g_state->settings = std::move(updated);
     const auto label = item_display_label(*item);
-    set_status(L"已把「" + label + L"」绑定到快捷栏 " + std::to_wstring(slot + 1), true);
+    set_status(L"已把「" + label + L"」绑定到第二行快捷栏 " + std::to_wstring(slot + 1), true);
     // The cell is ownerdraw and reads the settings when it paints. Saving alone changes
     // nothing on screen, which is why a successful drag looked like no bind at all.
     repaint_slot_row_cells();
@@ -3694,8 +3694,8 @@ xfx::ScriptReply execute_row_slot(int slot) {
     if (slot < 0 || slot >= static_cast<int>(g_state->settings.row_slots.size())) return failure;
     const std::wstring key = g_state->settings.row_slots[static_cast<size_t>(slot)];
     if (key.empty()) {
-        set_status(L"该快捷栏为空，可右键或按住 Shift 点击来绑定当前搜索结果");
-        failure.message = wide_to_utf8(L"该快捷栏为空，请先绑定一个效果或预设");
+        set_status(L"第二行快捷栏这一格是空的：把搜索结果拖过来，或右键绑定");
+        failure.message = wide_to_utf8(L"第二行快捷栏这一格是空的，请先绑定一个效果或预设");
         return failure;
     }
     for (const auto& item : g_state->catalog) {
@@ -3725,7 +3725,7 @@ void assign_row_slot(int slot) {
     auto updated = g_state->settings;
     updated.row_slots[static_cast<size_t>(slot)] = item_key(*item);
     try { xfx::SettingsStore::save(settings_path(), updated); }
-    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    catch (...) { set_status(L"第二行快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
     g_state->settings = std::move(updated);
     set_status(L"已绑定到第二行快捷栏 " + std::to_wstring(slot + 1), true);
     InvalidateRect(g_state->window, nullptr, FALSE);
@@ -4031,7 +4031,7 @@ void clear_row_slot(int slot) {
     auto updated = g_state->settings;
     updated.row_slots[static_cast<size_t>(slot)].clear();
     try { xfx::SettingsStore::save(settings_path(), updated); }
-    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    catch (...) { set_status(L"第二行快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
     g_state->settings = std::move(updated);
     repaint_slot_row_cells();
     if (IsWindow(g_state->window))
