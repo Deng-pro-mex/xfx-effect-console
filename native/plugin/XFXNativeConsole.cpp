@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.6";
+constexpr char kProductVersion[] = "1.5.7";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2545,6 +2545,10 @@ bool run_pending_apply_on_idle() {
         bool was_visible = false;
         bool close_console = true;
         bool applied = false;
+        // True while the work was re-queued (the host was mid-dialog). The palette must
+        // stay hidden until the real outcome arrives, otherwise it flashes once per idle
+        // tick for as long as the retry budget lasts.
+        bool deferred = false;
         ~Presentation() {
             if (!g_state) return;
             g_state->applying_item = false;
@@ -2553,6 +2557,7 @@ bool run_pending_apply_on_idle() {
             // Close here rather than posting WM_CLOSE: a queued close can outlive this
             // window and destroy a palette opened later in the same session.
             if (close_console && applied && IsWindow(window)) SendMessageW(window, WM_CLOSE, 0, 0);
+            else if (deferred && IsWindow(window)) return;
             else if (was_visible && IsWindow(window)) show_console(true);
         }
     } presentation;
@@ -2568,6 +2573,8 @@ bool run_pending_apply_on_idle() {
     presentation.applied = reply.succeeded;
     if (reply.pending) {
         // The precheck inside run_ae_script_now parked it again; nothing to report yet.
+        // Keep the palette hidden until the retried attempt produces a real outcome.
+        presentation.deferred = job.close_console;
         return true;
     }
     if ((reply.succeeded || reply.count) && job.remember && !job.item_key.empty() && g_state) {
