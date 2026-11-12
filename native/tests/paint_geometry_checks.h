@@ -122,14 +122,14 @@ static void check_settings_redraw_visibility() {
     SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0); pump();
     assert(!g_state->settings_visible);
     assert(!(GetWindowLongPtrW(hidden, GWL_STYLE) & WS_VISIBLE));
-    assert(!IsWindowVisible(g_state->hotkey_edit));
+    assert(!IsWindowVisible(g_state->hotkey_combo));
     DestroyWindow(hidden);
 }
 
 static void check_console_paint_geometry() {
     check_console_frame_geometry();
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
-        g_state->refresh, g_state->dictionary, g_state->hotkey_save,
+        g_state->refresh, g_state->dictionary,
         g_state->import_settings, g_state->export_settings})
         check_button_round_geometry(button);
     check_settings_redraw_visibility();

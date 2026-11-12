@@ -547,13 +547,76 @@ int wmain(int argc, wchar_t** argv) {
             RECT cell{};
             assert(GetWindowRect(g_state->slot_row_buttons[2], &cell));
             POINT drop{cell.left + 8, cell.top + 8};
-            ScreenToClient(g_state->results, &drop);
-            SendMessageW(g_state->results, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(drop.x, drop.y));
+            // The drag helper follows the real cursor, which a test cannot move.
+            g_test_drag_cursor = POINT{drop.x, drop.y};
+            POINT local = drop;
+            ScreenToClient(g_state->results, &local);
+            SendMessageW(g_state->results, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(local.x, local.y));
             assert(g_state->result_drag_target == 2);
-            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(drop.x, drop.y));
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(local.x, local.y));
+            g_test_drag_cursor.reset();
             pump();
             assert(!g_state->settings.row_slots[2].empty());
             std::cout << "PASS drag from results onto the second strip binds the item\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--hotkey-combo") {
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(260);
+            assert(IsWindowVisible(g_state->hotkey_combo));
+            const auto count = SendMessageW(g_state->hotkey_combo, CB_GETCOUNT, 0, 0);
+            assert(count >= 10);
+            const auto stored = g_state->settings.hotkey;
+            const LRESULT current = SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0);
+            assert(current >= 0);
+            // Pick a different entry: it must be applied to the settings and persisted.
+            const LRESULT next = (current + 1) % count;
+            SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, next, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kHotkeyComboId, CBN_SELCHANGE),
+                reinterpret_cast<LPARAM>(g_state->hotkey_combo));
+            pump();
+            wchar_t picked[128]{};
+            SendMessageW(g_state->hotkey_combo, CB_GETLBTEXT, next, reinterpret_cast<LPARAM>(picked));
+            assert(g_state->settings.hotkey == picked);
+            assert(xfx::SettingsStore::load(g_test_settings_path).hotkey == picked);
+            // The selected entry must stay selected, with no second value left on display.
+            assert(SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0) == next);
+            // Restore, so the rest of the run sees the original shortcut.
+            if (g_state->settings.hotkey != stored) {
+                const LRESULT back = (current >= 0 ? current : 0);
+                SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, back, 0);
+                SendMessageW(g_state->window, WM_COMMAND,
+                    MAKEWPARAM(kHotkeyComboId, CBN_SELCHANGE),
+                    reinterpret_cast<LPARAM>(g_state->hotkey_combo));
+                pump();
+            }
+            std::cout << "PASS summon shortcut dropdown applies, persists and restores\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--drop-highlight") {
+            show_console();
+            g_state->settings.show_slot_row = true;
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[4], &cell));
+            g_test_drag_cursor = POINT{cell.left + 10, cell.top + 10};
+            g_state->result_drag_armed = true;
+            g_state->result_drag_row = 0;
+            update_result_drag_target();
+            repaint_slot_row_cells();
+            pump_for(220);
+            if (argc > 1) save_test_preview(g_state->window,
+                fs::path(argv[1]).parent_path() / L"drop-highlight.png");
+            g_state->result_drag_armed = false;
+            g_test_drag_cursor.reset();
+            std::cout << "PASS drop target highlight rendered\n";
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
@@ -565,6 +628,7 @@ int wmain(int argc, wchar_t** argv) {
             g_state->settings.result_digit_shortcut = true;
             g_state->settings.result_digit_modifier = L"";
             SendMessageW(g_state->slot_row_key, CB_SETCURSEL, 3, 0);
+            SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, 1, 0);
             SendMessageW(g_state->result_digit_key, CB_SETCURSEL, 1, 0);
             refresh_shortcut_choice_labels();
             SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
@@ -622,8 +686,8 @@ int wmain(int argc, wchar_t** argv) {
                 RECT button = child_rect_in_parent(g_state->window, g_state->update_button);
                 RECT status = child_rect_in_parent(g_state->window, g_state->status);
                 assert(button.bottom <= status.top);
-                for (const auto other : {g_state->refresh, g_state->dictionary, g_state->count, g_state->hotkey_edit,
-                     g_state->hotkey_save, g_state->import_settings, g_state->export_settings, g_state->ime_mode_combo, g_state->light_theme}) {
+                for (const auto other : {g_state->refresh, g_state->dictionary, g_state->count, g_state->hotkey_combo,
+                     g_state->import_settings, g_state->export_settings, g_state->ime_mode_combo, g_state->light_theme}) {
                     RECT intersection{}, r = child_rect_in_parent(g_state->window, other);
                     assert(!IsWindowVisible(other) || !IntersectRect(&intersection, &button, &r));
                 }
@@ -711,7 +775,7 @@ int wmain(int argc, wchar_t** argv) {
                 assert(IsWindowVisible(control));
                 assert(!GetPropW(control, L"SysSetRedraw"));
             }
-            assert(!IsWindowVisible(g_state->hotkey_edit));
+            assert(!IsWindowVisible(g_state->hotkey_combo));
         }
         {
             SearchRedrawGuard redraw(g_state->window);
@@ -1263,8 +1327,16 @@ int wmain(int argc, wchar_t** argv) {
     SetKeyboardState(keys);
     const auto previous_hotkey = g_state->settings.hotkey;
     const auto previous_hotkey_spec = g_state->hotkey_spec;
-    try { hotkey_edit_proc(g_state->hotkey_edit, WM_KEYDOWN, 'K', 0); }
-    catch (...) { escaped = true; }
+    // Picking a shortcut while the settings file is read-only must report the failure and
+    // leave the previous shortcut in force, without throwing out of the window proc.
+    {
+        const LRESULT previous_choice = SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0);
+        SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, previous_choice == 0 ? 1 : 0, 0);
+        try { apply_hotkey_choice(); }
+        catch (...) { escaped = true; }
+        if (g_state->settings.hotkey == previous_hotkey)
+            SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, previous_choice, 0);
+    }
     SetKeyboardState(original_keys);
     assert(SetFileAttributesW(g_test_settings_path.c_str(), FILE_ATTRIBUTE_NORMAL));
     assert(!escaped); // Win32 callbacks must contain file write exceptions.
@@ -1286,14 +1358,16 @@ int wmain(int argc, wchar_t** argv) {
     SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0); pump_for(240);
     GetWindowRect(g_state->results, &after);
     assert(before.bottom - before.top == after.bottom - after.top);
-    assert(GetWindowLongW(g_state->hotkey_edit, GWL_STYLE) & WS_VISIBLE);
+    assert(GetWindowLongW(g_state->hotkey_combo, GWL_STYLE) & WS_VISIBLE);
     check_hotkey_input_geometry(regression_artifacts);
     RECT hotkey_label_rect{}, hotkey_edit_rect{}, status_rect{};
     GetWindowRect(g_state->hotkey_label, &hotkey_label_rect);
-    GetWindowRect(g_state->hotkey_edit, &hotkey_edit_rect);
+    GetWindowRect(g_state->hotkey_combo, &hotkey_edit_rect);
     GetWindowRect(g_state->status, &status_rect);
+    // A combobox HWND carries the native frame, so compare the row centres with the
+    // tolerance the DPI scaling needs rather than the exact HWND heights.
     assert(std::abs((hotkey_label_rect.top + hotkey_label_rect.bottom) -
-        (hotkey_edit_rect.top + hotkey_edit_rect.bottom)) <= 2);
+        (hotkey_edit_rect.top + hotkey_edit_rect.bottom)) <= 12);
     RECT refresh_rect{}, dictionary_rect{};
     GetWindowRect(g_state->refresh, &refresh_rect);
     GetWindowRect(g_state->dictionary, &dictionary_rect);
@@ -1304,7 +1378,7 @@ int wmain(int argc, wchar_t** argv) {
     POINT saved_cursor{}; GetCursorPos(&saved_cursor);
     SetCursorPos(60, 60); pump();
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
-        g_state->refresh, g_state->dictionary, g_state->hotkey_save,
+        g_state->refresh, g_state->dictionary,
         g_state->import_settings, g_state->export_settings})
         check_button_hover(button);
     if (argc > 1) save_test_preview(g_state->window, fs::path(argv[1]).parent_path() / L"settings-preview.png");
@@ -1316,7 +1390,7 @@ int wmain(int argc, wchar_t** argv) {
     SendMessageW(g_state->refresh, WM_MOUSELEAVE, 0, 0); pump_for(220);
     SetCursorPos(saved_cursor.x, saved_cursor.y);
     SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0); pump_for(240);
-    assert(!IsWindowVisible(g_state->hotkey_edit));
+    assert(!IsWindowVisible(g_state->hotkey_combo));
     if (argc > 1) {
         SetWindowPos(g_state->window, nullptr, 80, 80, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         save_test_preview(g_state->window, argv[1]);

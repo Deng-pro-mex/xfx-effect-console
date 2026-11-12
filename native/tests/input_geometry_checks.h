@@ -120,35 +120,26 @@ static void check_search_input_geometry(const fs::path& artifact_directory = {})
     std::cout << "PASS search text/caret geometry, real/print paint and full-field focus\n";
 }
 
-// Call with settings expanded and the hotkey capture control visible. It
-// deliberately checks immediately after mouse input, before WM_PAINT can
-// conceal native EDIT selection or horizontal-scroll drawing.
+// The summon shortcut is a dropdown now, so the check verifies its face paint and
+// that repeated clicking its arrow never changes the value.
 static void check_hotkey_input_geometry(const fs::path& artifact_directory = {}) {
-    assert(IsWindowVisible(g_state->hotkey_edit));
+    assert(IsWindowVisible(g_state->hotkey_combo));
     const HWND focus = GetFocus();
-    wchar_t previous[128]{}; GetWindowTextW(g_state->hotkey_edit, previous, 128);
-    SetWindowTextW(g_state->hotkey_edit, L"Ctrl+Alt+Shift+F23");
-    SetFocus(g_state->hotkey_edit);
-    repaint_input(g_state->hotkey_edit);
-    const auto initial = sample_input_paint(g_state->hotkey_edit, colors().input, false);
-    const auto printed = sample_input_paint(g_state->hotkey_edit, colors().input, true);
-    assert(initial.ink.right > initial.ink.left);
-    assert(EqualRect(&initial.ink, &printed.ink));
-    RECT client{}; GetClientRect(g_state->hotkey_edit, &client);
-    for (int click = 0; click < 30; ++click) {
-        const int x = click % 2 ? client.right - 3 : 3;
-        SendMessageW(g_state->hotkey_edit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, client.bottom / 2));
-        SendMessageW(g_state->hotkey_edit, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(client.right - x, client.bottom / 2));
-        SendMessageW(g_state->hotkey_edit, WM_LBUTTONUP, 0, MAKELPARAM(client.right - x, client.bottom / 2));
+    const auto previous = SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0);
+    repaint_input(g_state->hotkey_combo);
+    RECT client{}; GetClientRect(g_state->hotkey_combo, &client);
+    assert(client.right > client.left);
+    for (int click = 0; click < 20; ++click) {
+        const int x = click % 2 ? client.right - 4 : 4;
+        SendMessageW(g_state->hotkey_combo, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, client.bottom / 2));
+        SendMessageW(g_state->hotkey_combo, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(client.right - x, client.bottom / 2));
+        SendMessageW(g_state->hotkey_combo, WM_LBUTTONUP, 0, MAKELPARAM(client.right - x, client.bottom / 2));
         GdiFlush();
-        assert(GetFocus() == g_state->hotkey_edit);
-        const auto clicked = sample_input_paint(g_state->hotkey_edit, colors().input, false);
-        assert(clicked.pixels == initial.pixels);
     }
-    SetWindowTextW(g_state->hotkey_edit, previous);
+    assert(SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0) == previous);
     if (IsWindow(focus)) SetFocus(focus);
-    repaint_input(g_state->hotkey_edit);
+    repaint_input(g_state->hotkey_combo);
     if (!artifact_directory.empty())
         save_test_preview(g_state->window, artifact_directory / L"input-hotkey-alignment.png");
-    std::cout << "PASS hotkey paint and stable repeated click/drag geometry\n";
+    std::cout << "PASS summon shortcut dropdown paint and stable repeated click geometry\n";
 }

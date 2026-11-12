@@ -73,13 +73,12 @@ namespace fs = std::filesystem;
 constexpr int kHotkeyId = 0x5846;
 constexpr wchar_t kHotkeyWindowClassName[] = L"XFXNativeConsoleHotkeyWindow";
 constexpr wchar_t kHotkeyCaptureClassName[] = L"XFXNativeConsoleHotkeyCapture";
+// Summon shortcut is chosen from a fixed list. See kHotkeyChoices below.
 constexpr int kSearchId = 1001;
 constexpr int kFilterId = 1002;
 constexpr int kResultsId = 1003;
 constexpr int kApplyId = 1004;
 constexpr int kRefreshId = 1005;
-constexpr int kHotkeyEditId = 1006;
-constexpr int kHotkeySaveId = 1007;
 constexpr int kImeModeId = 1008;
 // Nine optional favourites buttons in their own strip.
 constexpr int kSlotRowFirstId = 1060;
@@ -104,6 +103,9 @@ constexpr int kCountId = 1010;
 constexpr int kTitleId = 1011;
 constexpr int kSubtitleId = 1012;
 constexpr int kHotkeyLabelId = 1013;
+// Summon shortcut is chosen from a fixed list instead of being typed into a hidden
+// capture control. See kHotkeyChoices.
+constexpr int kHotkeyComboId = 1101;
 constexpr int kFavoriteId = 1014;
 constexpr int kSlotId = 1015;
 constexpr int kImportId = 1016;
@@ -127,7 +129,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.0";
+constexpr char kProductVersion[] = "1.5.1";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -158,6 +160,8 @@ std::optional<xfx::ScriptReply> g_test_script_reply;
 void (*g_test_before_script)() = nullptr;
 std::string g_test_last_script;
 std::optional<POINT> g_test_cursor_position;
+// The drag helper reads the real cursor, which a test cannot move.
+std::optional<POINT> g_test_drag_cursor;
 POINT g_test_cursor_point{};
 bool g_test_cursor_in_surface = false;
 unsigned g_test_cursor_calls = 0;
@@ -635,8 +639,7 @@ struct PluginState {
     HWND result_digit_hint = nullptr;
     HWND results = nullptr;
     HWND refresh = nullptr;
-    HWND hotkey_edit = nullptr;
-    HWND hotkey_save = nullptr;
+    HWND hotkey_combo = nullptr;
     HWND ime_mode_combo = nullptr;
     HWND result_digit_checkbox = nullptr;
     HWND diagnostic_checkbox = nullptr;
@@ -965,10 +968,10 @@ void paint_text_button(const DRAWITEMSTRUCT& draw) {
     if (g_state->font) SelectObject(draw.hDC, g_state->font);
     const auto& palette = colors();
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
-    paint_button_surface(draw, draw.CtlID == kHotkeySaveId);
+    paint_button_surface(draw);
     wchar_t text[256]{}; GetWindowTextW(draw.hwndItem, text, 256);
     SetBkMode(draw.hDC, TRANSPARENT);
-    SetTextColor(draw.hDC, draw.itemState & ODS_DISABLED ? palette.disabled : draw.CtlID == kHotkeySaveId ? palette.selected_text : palette.text);
+    SetTextColor(draw.hDC, draw.itemState & ODS_DISABLED ? palette.disabled : palette.text);
     RECT text_rect = draw.rcItem;
     DrawTextW(draw.hDC, text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     RestoreDC(draw.hDC, saved);
@@ -995,7 +998,7 @@ struct BusyFeedback {
             bounds = {x,y,x+width,y+height};
         }
         surface = std::make_unique<xfx::LoadingSurface>(bounds,colors(),text,scale,reduced_motion());
-        for (HWND control : {g_state->capture,g_state->refresh,g_state->hotkey_save,g_state->import_settings,g_state->export_settings}) {
+        for (HWND control : {g_state->capture,g_state->refresh,g_state->import_settings,g_state->export_settings}) {
             if (IsWindow(control)) { controls.emplace_back(control,IsWindowEnabled(control)!=FALSE); EnableWindow(control,FALSE); }
         }
     }
@@ -1023,25 +1026,51 @@ UINT current_hotkey_modifiers() {
     return modifiers;
 }
 
-// True when keyboard input must reach the focused control instead of the global
-// hotkey. Without this the shortcut swallows the very keys the user is pressing to
-// record a new shortcut, which is why changing the hotkey appeared impossible.
-bool hotkey_capture_active() {
-    if (!g_state) return false;
-    // Focus is the primary signal: whatever happens to the property (window recreation,
-    // a lost WM_SETFOCUS), the recording box having focus means every key belongs to it.
-    if (g_state->hotkey_edit && IsWindow(g_state->hotkey_edit) &&
-        GetFocus() == g_state->hotkey_edit) return true;
-    // Only active while the shortcut is being recorded. The search box must NOT count:
-    // the console has to remain reachable by its own shortcut while the user types.
-    return g_state->hotkey_window &&
-        GetPropW(g_state->hotkey_window, L"XFXHotkeyCapture") != nullptr;
+// Index of the second-strip cell under the given screen point, or -1.
+int slot_row_cell_at(POINT point) {
+    if (!g_state) return -1;
+    for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+        RECT cell{};
+        if (!IsWindowVisible(g_state->slot_row_buttons[index])) continue;
+        if (!GetWindowRect(g_state->slot_row_buttons[index], &cell)) continue;
+        if (PtInRect(&cell, point)) return static_cast<int>(index);
+    }
+    return -1;
 }
+
+// Repaints the strip cells so the drop target is visible. They are ownerdraw child
+// windows; invalidating the parent does not repaint them.
+void repaint_slot_row_cells() {
+    if (!g_state) return;
+    for (HWND button : g_state->slot_row_buttons) {
+        if (IsWindow(button)) InvalidateRect(button, nullptr, FALSE);
+    }
+}
+
+// Follows the real cursor. A drag can receive coalesced or filtered moves, so the
+// reported position is not trustworthy; the cursor always is.
+void update_result_drag_target() {
+    if (!g_state) return;
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return;
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_drag_cursor) cursor = *g_test_drag_cursor;
+#endif
+    const int target = slot_row_cell_at(cursor);
+    if (target == g_state->result_drag_target) return;
+    g_state->result_drag_target = target;
+    repaint_slot_row_cells();
+}
+
+// The shortcut is no longer recorded by typing into a hidden control; it is picked from a
+// list. Nothing suppresses the global shortcut any more, so the console stays reachable
+// by its own key at all times.
+bool hotkey_capture_active() { return false; }
 
 LRESULT CALLBACK console_keyboard_hook(int code, WPARAM wparam, LPARAM lparam) {
     if (code >= 0 && wparam == PM_REMOVE && g_state && g_state->modal_depth == 0) {
         auto* message = reinterpret_cast<MSG*>(lparam);
-        if (!hotkey_capture_active() && GetFocus() != g_state->hotkey_edit &&
+        if (!hotkey_capture_active() &&
             hotkey_event_matches(message->message, static_cast<UINT>(message->wParam),
                                  current_hotkey_modifiers(), g_state->hotkey_spec)) {
             DWORD process = 0;
@@ -1064,7 +1093,6 @@ LRESULT CALLBACK console_low_level_keyboard_hook(int code, WPARAM wparam, LPARAM
             g_state->hotkey_key_down = false;
         } else if (down && g_state->modal_depth == 0 &&
                    !hotkey_capture_active() &&
-                   GetFocus() != g_state->hotkey_edit &&
                    !g_state->hotkey_key_down &&
                    hotkey_event_matches(static_cast<UINT>(wparam), event->vkCode,
                                         current_hotkey_modifiers(),
@@ -1273,7 +1301,8 @@ bool drag_button_is_held() {
     return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
 }
 
-void save_hotkey();
+// Shows the stored summon shortcut in its dropdown.
+void select_hotkey_choice(const std::wstring& value);
 // Re-registers the configured shortcut after recording released it.
 void restore_suspended_hotkey();
 // Recording is hold-based: the modifier must still be down when the final key is
@@ -1323,6 +1352,23 @@ inline constexpr std::array<ShortcutChoice, 6> kShortcutChoices{{
     {L"Alt + 数字", L"Alt"},
     {L"Shift + 数字", L"Shift"},
     {L"Ctrl + Alt + 数字", L"Ctrl+Alt"},
+}};
+
+// Ready-made summon shortcuts. Recording a chord into a hidden control depended on the
+// host, the IME and whether RegisterHotKey still owned the combination, which is why the
+// shortcut could be changed on one attempt and silently rejected on the next. A list has
+// one code path and states its outcome immediately.
+inline constexpr std::array<const wchar_t*, 10> kHotkeyChoices{{
+    L"Ctrl+Space",
+    L"Ctrl+Shift+Space",
+    L"Ctrl+Alt+Space",
+    L"Alt+Space",
+    L"Ctrl+Shift+A",
+    L"Ctrl+Alt+A",
+    L"Ctrl+Shift+E",
+    L"Alt+E",
+    L"Ctrl+Shift+F",
+    L"Ctrl+Alt+F",
 }};
 
 // True when both groups are enabled and would answer the same key combination.
@@ -1498,210 +1544,6 @@ bool point_in_search_surface(HWND hwnd, POINT point) {
 // poller runs. 15 ms is fast enough to feel instant and slow enough to cost nothing.
 constexpr int kHotkeyPollTimerId = 0xB010;
 constexpr UINT kHotkeyPollIntervalMs = 15;
-
-// Reads the physical keyboard and records the first complete combination. This is the
-// fallback path: it works even when key messages are swallowed by the host or the IME,
-// which is exactly the reported symptom of a press being ignored.
-void capture_hotkey_from_keyboard_state(HWND hwnd) {
-    if (!g_state || !IsWindow(hwnd) || GetFocus() != hwnd) return;
-    static UINT last_key = 0;
-    const auto chosen = [&](UINT key) {
-        xfx::HotkeySpec spec;
-        if (GetKeyState(VK_CONTROL) & 0x8000) spec.modifiers |= MOD_CONTROL;
-        if (GetKeyState(VK_MENU) & 0x8000) spec.modifiers |= MOD_ALT;
-        if (GetKeyState(VK_SHIFT) & 0x8000) spec.modifiers |= MOD_SHIFT;
-        if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) spec.modifiers |= MOD_WIN;
-        // Hold test: without a modifier this would hijack ordinary typing.
-        if (spec.modifiers == 0) return false;
-        spec.virtual_key = key;
-        const std::wstring text = xfx::format_hotkey(spec);
-        if (text.empty()) return false;
-        SetWindowTextW(hwnd, text.c_str());
-        save_hotkey();
-        KillTimer(hwnd, kHotkeyPollTimerId);
-        SetFocus(g_state->search);
-        return true;
-    };
-    // Everything except the modifier keys themselves counts as the final key.
-    for (UINT key = 0x08; key <= 0xFE; ++key) {
-        if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU ||
-            key == VK_LWIN || key == VK_RWIN) continue;
-        if (!(GetAsyncKeyState(static_cast<int>(key)) & 0x8000)) continue;
-        if (key == last_key) continue;   // still the same press
-        last_key = key;
-        if (chosen(key)) return;
-    }
-}
-
-LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    return guarded_callback([&]() -> LRESULT {
-    if (message == WM_SETFONT) {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, static_cast<LONG_PTR>(wparam));
-        if (lparam) InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    }
-    if (message == WM_GETFONT) return GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (message == WM_SETTEXT) {
-        const auto result = DefWindowProcW(hwnd, message, wparam, lparam);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return result;
-    }
-    if (message == WM_ERASEBKGND) return TRUE;
-    if (message == WM_PAINT || message == WM_PRINTCLIENT) {
-        PAINTSTRUCT paint{};
-        HDC dc = message == WM_PAINT ? BeginPaint(hwnd, &paint) : reinterpret_cast<HDC>(wparam);
-        const int saved = SaveDC(dc);
-        RECT bounds{}; GetClientRect(hwnd, &bounds);
-        FillRect(dc, &bounds, g_state->input_brush);
-        const auto font = reinterpret_cast<HFONT>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        SelectObject(dc, font ? font : g_state->font);
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, IsWindowEnabled(hwnd) ? colors().text : colors().disabled);
-        wchar_t text[128]{}; GetWindowTextW(hwnd, text, 128);
-        const int margin = MulDiv(4, GetDpiForWindow(hwnd), 96);
-        // Recording state is shown in the field itself: an accent frame plus a caret,
-        // so clicking the box gives obvious feedback even if the eye is not on the
-        // bottom status line.
-        const bool recording = GetFocus() == hwnd && IsWindowEnabled(hwnd);
-        if (recording) {
-            RECT frame = bounds;
-            xfx::paint_round_rect(dc, frame, colors().input,
-                static_cast<float>(MulDiv(3, GetDpiForWindow(hwnd), 96)), colors().accent);
-        }
-        bounds.left += margin; bounds.right -= margin;
-        DrawTextW(dc, text, -1, &bounds, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        if (recording) {
-            SIZE extent{};
-            GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &extent);
-            const int caret_x = (std::min)(bounds.left + extent.cx + 1, bounds.right - 2);
-            RECT caret{caret_x, bounds.top + MulDiv(3, GetDpiForWindow(hwnd), 96),
-                       caret_x + MulDiv(1, GetDpiForWindow(hwnd), 96),
-                       bounds.bottom - MulDiv(3, GetDpiForWindow(hwnd), 96)};
-            HBRUSH caret_brush = CreateSolidBrush(colors().accent);
-            FillRect(dc, &caret, caret_brush);
-            DeleteObject(caret_brush);
-        }
-        if (saved) RestoreDC(dc, saved);
-        if (message == WM_PAINT) EndPaint(hwnd, &paint);
-        return 0;
-    }
-    if (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) {
-        SetFocus(hwnd);
-        return 0;
-    }
-    if (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == WM_ENABLE) {
-        // While this box has focus every key belongs to shortcut recording. The
-        // global hooks honour this flag so pressing the *current* shortcut (for
-        // example Shift+Space) reaches the box instead of firing the console.
-        if (message == WM_SETFOCUS) {
-            // Release the currently registered shortcut for the duration of recording.
-            // RegisterHotKey consumes its own combination system-wide, so with it still
-            // active the very keys the user presses (notably Space in Ctrl+Space) never
-            // reach this box and the press looks ignored.
-            if (g_state->hotkey_window) {
-                RemovePropW(g_state->hotkey_window, L"XFXHotkeySuspended");
-                SetPropW(g_state->hotkey_window, L"XFXHotkeySuspended",
-                         reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
-            }
-            g_state->hotkey.unregister();
-            if (g_state->keyboard_hook) {
-                UnhookWindowsHookEx(g_state->keyboard_hook);
-                g_state->keyboard_hook = nullptr;
-            }
-            // Immediate feedback the moment the box is clicked, so the user knows the
-            // plugin is listening instead of guessing whether the click registered.
-            set_status(L"正在录制快捷键：请按住修饰键再按一个键，Esc 取消");
-            // Belt and braces: the message path handles normal presses, the poller
-            // catches presses whose messages the host or the IME consumed.
-            SetTimer(hwnd, kHotkeyPollTimerId, kHotkeyPollIntervalMs, nullptr);
-        }
-        if (g_state && g_state->hotkey_window &&
-            (message == WM_SETFOCUS || message == WM_KILLFOCUS)) {
-            // RemoveProp (not a stored zero) keeps GetPropW unambiguous for callers.
-            // WM_ENABLE must not clear the flag: the console disables controls while a
-            // busy surface is shown, and that is not a focus change.
-            if (message == WM_SETFOCUS) {
-                SetPropW(g_state->hotkey_window, L"XFXHotkeyCapture",
-                         reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
-            } else {
-                KillTimer(hwnd, kHotkeyPollTimerId);
-                RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
-                // Leaving the box without recording something must not leave the
-                // console without a working shortcut.
-                restore_suspended_hotkey();
-            }
-        }
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return DefWindowProcW(hwnd, message, wparam, lparam);
-    }
-    if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
-    if (message == WM_TIMER && wparam == kHotkeyPollTimerId) {
-        // Fallback capture. AE and some IMEs eat the key-down messages that would
-        // otherwise reach this box, which is why recording could appear to ignore a
-        // press. Polling the physical key state does not depend on message delivery.
-        capture_hotkey_from_keyboard_state(hwnd);
-        return 0;
-    }
-    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
-        const UINT key = static_cast<UINT>(wparam);
-        if (key == VK_ESCAPE) {
-            // Cancel leaves the stored shortcut untouched, but the registration that was
-            // released for recording must come back.
-            SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
-            KillTimer(hwnd, kHotkeyPollTimerId);
-            restore_suspended_hotkey();
-            set_status(L"已取消录制，快捷键未修改", true);
-            SetFocus(g_state->search);
-            return 0;
-        }
-        // Hold-to-record: the modifier and the key must be down at the same time, which
-        // is exactly how the shortcut will be pressed in normal use. A tapped modifier
-        // that was already released does NOT count, because that combination could never
-        // actually trigger the shortcut.
-        if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU ||
-            key == VK_LWIN || key == VK_RWIN) {
-            // Remember which modifiers are held so the prompt can list them.
-            std::wstring held;
-            if (GetKeyState(VK_CONTROL) & 0x8000) held += L"Ctrl+";
-            if (GetKeyState(VK_MENU) & 0x8000) held += L"Alt+";
-            if (GetKeyState(VK_SHIFT) & 0x8000) held += L"Shift+";
-            if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) held += L"Win+";
-            if (key == VK_CONTROL && held.find(L"Ctrl+") == std::wstring::npos) held += L"Ctrl+";
-            if (key == VK_MENU && held.find(L"Alt+") == std::wstring::npos) held += L"Alt+";
-            if (key == VK_SHIFT && held.find(L"Shift+") == std::wstring::npos) held += L"Shift+";
-            if ((key == VK_LWIN || key == VK_RWIN) && held.find(L"Win+") == std::wstring::npos) held += L"Win+";
-            set_status(held.empty()
-                ? L"正在录制：按住修饰键不要松开，再按另一个键"
-                : L"正在录制：" + held + L"（保持按住）…再按另一个键");
-            return 0;
-        }
-
-        xfx::HotkeySpec spec;
-        // Read the live key state: this is the hold test. If the modifier is not still
-        // down, the combination would not fire, so it is refused outright.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) spec.modifiers |= MOD_CONTROL;
-        if ((GetKeyState(VK_MENU) & 0x8000) != 0) spec.modifiers |= MOD_ALT;
-        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) spec.modifiers |= MOD_SHIFT;
-        if ((GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0)
-            spec.modifiers |= MOD_WIN;
-        if (spec.modifiers == 0) {
-            set_status(L"请按住 Ctrl / Alt / Shift / Win 之一不要松开，再按一个键");
-            return 0;
-        }
-
-        spec.virtual_key = key;
-        const std::wstring text = xfx::format_hotkey(spec);
-        if (text.empty()) { set_status(L"这个按键无法作为快捷键，请换一个"); return 0; }
-        SetWindowTextW(hwnd, text.c_str());
-        // save_hotkey reports the concrete outcome (registered, or rejected because
-        // another program already owns the combination).
-        KillTimer(hwnd, kHotkeyPollTimerId);
-        save_hotkey();
-        return 0;
-    }
-    if (message == WM_CHAR || message == WM_SYSCHAR || message == WM_KEYUP || message == WM_SYSKEYUP) return 0;
-    return DefWindowProcW(hwnd, message, wparam, lparam);
-    });
-}
 
 void cycle_filter() {
     const LRESULT selected = SendMessageW(g_state->filter, CB_GETCURSEL, 0, 0);
@@ -1890,20 +1732,10 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     if (!result_action_click && forward_edge_drag(hwnd, message, wparam, lparam)) return 0;
     if (message == WM_MOUSEMOVE && g_state->result_drag_armed) {
-        // Dragging a selected result: track the strip cell under the cursor so the user
-        // sees where the drop will land. This runs before the hover logic, which returns.
-        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-        ClientToScreen(hwnd, &point);
-        int target = -1;
-        for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
-            RECT cell{};
-            if (!GetWindowRect(g_state->slot_row_buttons[index], &cell)) continue;
-            if (PtInRect(&cell, point)) { target = static_cast<int>(index); break; }
-        }
-        if (target != g_state->result_drag_target) {
-            g_state->result_drag_target = target;
-            RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-        }
+        // Dragging a result towards the strip: follow the real cursor instead of the
+        // reported position, and repaint the cells directly. They are ownerdraw child
+        // windows, so invalidating the parent never repainted them.
+        update_result_drag_target();
         return 0;
     }
     if (message == WM_MOUSEMOVE) {
@@ -1991,6 +1823,21 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     if (message == WM_LBUTTONUP) {
+        // Drop resolves before the click gate: a drag that started on a result is a bind,
+        // not an apply, and it must not be lost if the click state was already cleared.
+        if (g_state->result_drag_armed && !g_state->result_click_pending) {
+            update_result_drag_target();
+            const int drop_target = g_state->result_drag_target;
+            const int drag_row = g_state->result_drag_row;
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            g_state->result_drag_target = -1;
+            repaint_slot_row_cells();
+            if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
+            else if (drop_target < 0 && drag_row >= 0 && !IsWindowVisible(g_state->slot_row_buttons[0]))
+                set_status(L"第二行快捷栏已关闭，请先在设置里打开它再拖动绑定");
+            return 0;
+        }
         if (g_state->result_click_pending) {
             const int pending_row = g_state->result_click_row;
             const auto pending_action = g_state->result_click_action;
@@ -2012,10 +1859,12 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
 
             // A drop on the second strip binds the dragged result there. This is the
             // documented way to fill the strip, and it must win over the apply path.
+            update_result_drag_target();
             const int drop_target = g_state->result_drag_target;
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             g_state->result_drag_target = -1;
+            repaint_slot_row_cells();
             if (drop_target >= 0) {
                 SendMessageW(hwnd, LB_SETCURSEL, pending_row, 0);
                 assign_row_slot_dragged(drop_target, pending_row);
@@ -2084,7 +1933,15 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         return result;
     }
     if ((message == WM_CAPTURECHANGED || message == WM_CANCELMODE) &&
-        g_state->result_click_pending) {
+        (g_state->result_click_pending || g_state->result_drag_armed)) {
+        if (g_state->result_drag_armed) {
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            if (g_state->result_drag_target >= 0) {
+                g_state->result_drag_target = -1;
+                repaint_slot_row_cells();
+            }
+        }
         g_state->result_click_pending = false;
         if (g_state->result_click_redraw_held) {
             g_state->result_click_redraw_held = false;
@@ -3591,14 +3448,15 @@ void apply_imported_settings(const xfx::Settings& imported) {
     g_state->palette = palette;
     brushes.install();
     rebuild_customized_catalog();
-    SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
+    select_hotkey_choice(g_state->settings.hotkey);
     SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
                  static_cast<int>(g_state->settings.ime_mode), 0);
-    SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
-                 g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
+                 g_state->settings.result_digit_shortcut
+                     ? modifier_combo_index(g_state->settings.result_digit_modifier) : 0, 0);
+    refresh_shortcut_choice_labels();
     SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
     const bool hotkey_ok = register_configured_hotkey();
-    SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
     populate_results();
     set_status(hotkey_ok ? L"配置已导入" : L"配置已导入；快捷键被占用，请重新设置",hotkey_ok);
 }
@@ -3878,9 +3736,8 @@ void save_settings() {
     if (ime_choice >= 0 && ime_choice <= 3) updated.ime_mode = static_cast<xfx::ImeMode>(ime_choice);
     updated.use_english_mode = updated.ime_mode == xfx::ImeMode::Restore ||
                                updated.ime_mode == xfx::ImeMode::EnglishAlways;
-    wchar_t hotkey[128] = {};
-    GetWindowTextW(g_state->hotkey_edit, hotkey, 128);
-    updated.hotkey = hotkey;
+    // The summon shortcut is owned by its dropdown; save_settings must not overwrite it
+    // from a control that no longer exists.
     updated.fixed_window = false;
     updated.auto_close = true;
     updated.full_resolution_screenshots = true;
@@ -3907,34 +3764,57 @@ void restore_suspended_hotkey() {
     register_configured_hotkey();
 }
 
-void save_hotkey() {
-    wchar_t hotkey[128] = {};
-    GetWindowTextW(g_state->hotkey_edit, hotkey, 128);
-    const auto previous = g_state->settings.hotkey;
-    g_state->settings.hotkey = hotkey;
-    if (!register_configured_hotkey()) {
-        g_state->settings.hotkey = previous;
-        SetWindowTextW(g_state->hotkey_edit, previous.c_str());
-        // Distinguish "bad text" from "someone else owns this combination": the second
-        // case is the common one (IME and other apps reserve Shift+Space etc.).
-        xfx::HotkeySpec probe;
-        set_status(xfx::parse_hotkey(hotkey, &probe)
-            ? std::wstring(L"该快捷键已被其它程序占用，未生效；请换一个组合（原快捷键保持不变）")
-            : std::wstring(L"快捷键格式不正确，未生效；请按住 Ctrl/Alt/Shift 再按一个键"));
+// Shows the stored shortcut in the list. A custom value that is not one of the ready
+// choices is added so it stays visible and selectable.
+void select_hotkey_choice(const std::wstring& value) {
+    if (!g_state || !g_state->hotkey_combo) return;
+    if (value.empty()) { SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, -1, 0); return; }
+    const LRESULT count = SendMessageW(g_state->hotkey_combo, CB_GETCOUNT, 0, 0);
+    for (LRESULT index = 0; index < count; ++index) {
+        wchar_t label[128]{};
+        if (SendMessageW(g_state->hotkey_combo, CB_GETLBTEXT, index,
+                reinterpret_cast<LPARAM>(label)) == CB_ERR) continue;
+        if (value == label) { SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, index, 0); return; }
+    }
+    SendMessageW(g_state->hotkey_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value.c_str()));
+    const LRESULT added = SendMessageW(g_state->hotkey_combo, CB_GETCOUNT, 0, 0);
+    SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, added - 1, 0);
+}
+
+// Applies the picked summon shortcut. Returns immediately on success; on failure the
+// list is put back on the stored value, so a rejected pick never lingers as the shown
+// state - that mismatch used to be read back later and applied anyway.
+void apply_hotkey_choice() {
+    if (!g_state || !g_state->hotkey_combo) return;
+    const LRESULT choice = SendMessageW(g_state->hotkey_combo, CB_GETCURSEL, 0, 0);
+    if (choice < 0) return;
+    wchar_t picked[128]{};
+    if (SendMessageW(g_state->hotkey_combo, CB_GETLBTEXT, choice,
+            reinterpret_cast<LPARAM>(picked)) == CB_ERR) return;
+    const std::wstring candidate = picked;
+    if (candidate == g_state->settings.hotkey) {
+        set_status(L"快捷键未改变", true);
         return;
     }
-    g_state->settings.hotkey = hotkey;
-    // Recording released the previous registration; clear the suspended marker so the
-    // new combination stays registered instead of being treated as still suspended.
+    const std::wstring previous = g_state->settings.hotkey;
+    g_state->settings.hotkey = candidate;
+    if (!register_configured_hotkey()) {
+        g_state->settings.hotkey = previous;
+        register_configured_hotkey();
+        select_hotkey_choice(previous);
+        set_status(L"这个快捷键已被其它程序占用，未生效。请换一个（原快捷键保持不变）");
+        return;
+    }
     if (g_state->hotkey_window) RemovePropW(g_state->hotkey_window, L"XFXHotkeySuspended");
     try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
     catch (...) {
         g_state->settings.hotkey = previous;
         register_configured_hotkey();
-        SetWindowTextW(g_state->hotkey_edit, previous.c_str());
-        throw;
+        select_hotkey_choice(previous);
+        set_status(L"快捷键未能保存，请检查文档目录写入权限");
+        return;
     }
-    set_status(L"快捷键已保存",true);
+    set_status(L"快捷键已改为 " + candidate, true);
 }
 
 // Applies the closing half of the selected input-method mode.
@@ -4373,11 +4253,10 @@ void layout_controls(HWND hwnd) {
     setting(g_state->count, control_x + 184, y + 4,
             (std::max)(0, gutter - (control_x - pad) - 184), 20);
 
-    // 2) Global summon shortcut: label, editable field that stretches, save button.
+    // 2) Global summon shortcut: a full-width list of ready combinations.
     y = next_row(row_h);
     setting(g_state->hotkey_label, pad, y, label_w, row_h);
-    setting(g_state->hotkey_edit, control_x, y, (std::max)(80, control_w - 60), row_h);
-    setting(g_state->hotkey_save, control_x + control_w - 52, y, 52, row_h);
+    setting(g_state->hotkey_combo, control_x, y, control_w, row_h, 24);
 
     // 3-4) Appearance: two full-width dropdowns, one per row.
     y = next_row(row_h);
@@ -4425,7 +4304,7 @@ void layout_controls(HWND hwnd) {
     move(g_state->status,8,height-20,inner-update_width-version_width,18);
     move(g_state->version_label,inner+8-version_width,height-20,version_width,18);
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
-                        g_state->refresh, g_state->dictionary, g_state->hotkey_save,
+                        g_state->refresh, g_state->dictionary,
                         g_state->import_settings, g_state->export_settings, g_state->update_button,
                         g_state->export_log_button})
         apply_button_region(button);
@@ -4518,9 +4397,15 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
         return 0;
     }
     const auto result = DefSubclassProc(hwnd, message, wp, lp);
-    const bool native_face_update = message == WM_SETFOCUS || message == WM_KILLFOCUS ||
-        message == CB_SETCURSEL || message == CB_SHOWDROPDOWN || message == WM_ENABLE ||
-        message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_KEYDOWN || message == WM_KEYUP;
+    // Native ComboBox draws directly during these messages, including its own arrow and
+    // focus frame, so the custom face must be complete before returning. Opening the list
+    // is excluded: the closed face does not change, and a synchronous full repaint at that
+    // moment is exactly the flash seen when the list is opened and closed quickly.
+    const bool opening_popup = message == CB_SHOWDROPDOWN && wp != 0;
+    const bool native_face_update = !opening_popup &&
+        (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == CB_SETCURSEL ||
+         message == CB_SHOWDROPDOWN || message == WM_ENABLE || message == WM_LBUTTONDOWN ||
+         message == WM_LBUTTONUP || message == WM_KEYDOWN || message == WM_KEYUP);
     if (native_face_update && IsWindow(hwnd) && !g_state->redraw_transaction) {
         // Native ComboBox draws directly during these messages, including its
         // arrow and focus frame. Complete the custom face before returning;
@@ -4586,6 +4471,10 @@ void theme_combo_popup(HWND combo) {
         GetWindowThreadProcessId(popup, &owner_process);
         if (owner_process != process_id) continue;
         if (GetWindow(popup, GW_OWNER) != combo && GetParent(popup) != combo) continue;
+        // Style the popup exactly once. Re-theming on every open threw WM_THEMECHANGED
+        // into a list that was already on screen, which is the flicker seen when the
+        // dropdown is opened and closed quickly.
+        if (GetPropW(popup, L"XFXComboPopupThemed")) continue;
         SetWindowTheme(popup, L"", L"");
         SetWindowSubclass(popup, combo_popup_proc, kComboPopupSubclassId, 0);
         const HWND list = FindWindowExW(popup, nullptr, L"ListBox", nullptr);
@@ -4593,6 +4482,7 @@ void theme_combo_popup(HWND combo) {
             SetWindowTheme(list, L"", L"");
             SetWindowSubclass(list, combo_popup_proc, kComboPopupSubclassId, 0);
             set_font(list);
+            SetPropW(popup, L"XFXComboPopupThemed", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
             InvalidateRect(list, nullptr, FALSE);
         }
         InvalidateRect(popup, nullptr, FALSE);
@@ -4840,17 +4730,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->count, L"STATIC", L"正在统计...", WS_CHILD | WS_VISIBLE | SS_RIGHT, kCountId);
         create_control(hwnd, &g_state->hotkey_label, L"STATIC", L"快捷键：",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kHotkeyLabelId);
-        WNDCLASSEXW capture_class{sizeof(capture_class)};
-        capture_class.hInstance = GetModuleHandleW(nullptr);
-        capture_class.lpfnWndProc = hotkey_edit_proc;
-        capture_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        capture_class.lpszClassName = kHotkeyCaptureClassName;
-        if (!RegisterClassExW(&capture_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-            return -1;
-        create_control(hwnd, &g_state->hotkey_edit, kHotkeyCaptureClassName, L"Ctrl+Space",
-                       WS_CHILD | WS_VISIBLE | WS_TABSTOP, kHotkeyEditId);
-        if (!g_state->hotkey_edit) return -1;
-        create_control(hwnd, &g_state->hotkey_save, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kHotkeySaveId);
+        // The summon shortcut is a list, not a typing box: picking a value always has one
+        // code path, so it cannot half-succeed depending on which key the host delivered.
+        create_control(hwnd, &g_state->hotkey_combo, L"COMBOBOX", L"唤起快捷键",
+                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                       CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kHotkeyComboId);
+        if (!g_state->hotkey_combo) return -1;
+        for (const auto* label : kHotkeyChoices)
+            SendMessageW(g_state->hotkey_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        SetWindowTheme(g_state->hotkey_combo, L"", L"");
         create_control(hwnd, &g_state->import_settings, L"BUTTON", L"导入", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kImportId);
         create_control(hwnd, &g_state->export_settings, L"BUTTON", L"导出", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportId);
         create_control(hwnd, &g_state->ime_mode_combo, L"COMBOBOX", L"输入法模式",
@@ -4885,7 +4773,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetWindowTheme(g_state->slot_row_key, L"", L"");
         SetWindowTheme(g_state->result_digit_key, L"", L"");
         for (HWND combo : {g_state->filter, g_state->light_theme, g_state->ime_mode_combo,
-                           g_state->slot_row_key, g_state->result_digit_key}) {
+                           g_state->slot_row_key, g_state->result_digit_key,
+                           g_state->hotkey_combo}) {
             if (!combo) continue;
             SetWindowSubclass(combo, combo_face_proc, 0xB005, 0);
             SendMessageW(combo, CB_SETITEMHEIGHT, 0, MulDiv(26, GetDpiForWindow(hwnd), 96));
@@ -4928,7 +4817,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             SendMessageW(g_state->tooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 600);
             SendMessageW(g_state->tooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 10000);
         }
-        SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
+        // Select the stored shortcut, or add it if it is not one of the ready choices so
+        // an existing custom value is still displayed and keeps working.
+        select_hotkey_choice(g_state->settings.hotkey);
         SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
                      static_cast<int>(g_state->settings.ime_mode), 0);
         SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
@@ -4950,7 +4841,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         layout_controls(hwnd);
         const HWND animated_buttons[] = {g_state->capture, g_state->slot, g_state->preferences,
-            g_state->refresh, g_state->dictionary, g_state->hotkey_save,
+            g_state->refresh, g_state->dictionary,
             g_state->import_settings, g_state->export_settings, g_state->export_log_button,
             g_state->slot_row_buttons[0], g_state->slot_row_buttons[1], g_state->slot_row_buttons[2],
             g_state->slot_row_buttons[3], g_state->slot_row_buttons[4], g_state->slot_row_buttons[5],
@@ -4971,7 +4862,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         const HWND tools[] = {
             g_state->search, g_state->filter, g_state->capture, g_state->slot, g_state->preferences,
             g_state->refresh, g_state->dictionary,
-            g_state->hotkey_edit, g_state->hotkey_save, g_state->import_settings, g_state->export_settings,
+            g_state->hotkey_combo, g_state->import_settings, g_state->export_settings,
             g_state->ime_mode_combo, g_state->light_theme
         };
         const wchar_t* tips[] = {
@@ -5547,8 +5438,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             refresh_catalog();
             return 0;
         }
-        if (LOWORD(wparam) == kHotkeySaveId && HIWORD(wparam) == BN_CLICKED) {
-            save_hotkey();
+        if (LOWORD(wparam) == kHotkeyComboId && HIWORD(wparam) == CBN_SELCHANGE) {
+            apply_hotkey_choice();
+            return 0;
+        }
+        if (LOWORD(wparam) == kHotkeyComboId && HIWORD(wparam) == CBN_DROPDOWN) {
+            theme_combo_popup(g_state->hotkey_combo);
             return 0;
         }
         if (LOWORD(wparam) == kImportId && HIWORD(wparam) == BN_CLICKED) {
@@ -5625,7 +5520,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_state->background_brush = nullptr;
         g_state->input_brush = nullptr;
         g_state->search_brush=nullptr;
-        g_state->hotkey_edit = nullptr;
+        g_state->hotkey_combo = nullptr;
         g_state->status = nullptr;
         g_state->version_label = nullptr;
         g_state->update_button = nullptr;
@@ -5819,8 +5714,7 @@ void toggle_console() {
 LRESULT CALLBACK hotkey_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     return guarded_callback([&]() -> LRESULT {
     if (message == WM_APP + 1 || (message == WM_HOTKEY && wparam == kHotkeyId)) {
-        if (!g_state || g_state->modal_depth ||
-            (g_state->hotkey_edit && GetFocus() == g_state->hotkey_edit)) return 0;
+        if (!g_state || g_state->modal_depth) return 0;
         DWORD foreground_process = 0;
 #ifdef XFX_CONSOLE_TEST
         if (g_test_hotkey_foreground_process) foreground_process = *g_test_hotkey_foreground_process;

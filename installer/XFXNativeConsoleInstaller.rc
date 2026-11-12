@@ -29,8 +29,8 @@ BEGIN
     BLOCK "080404B0"
     BEGIN
       VALUE "ProductName", "效果控制台"
-      VALUE "ProductVersion", "1.5.0"
-      VALUE "FileVersion", "1.5.0.0"
+      VALUE "ProductVersion", "1.5.1"
+      VALUE "FileVersion", "1.5.1.0"
 #ifdef XFX_UNINSTALLER
       VALUE "FileDescription", "效果控制台一键卸载"
 #else
