@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.24";
+constexpr char kProductVersion[] = "1.5.25";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -166,6 +166,7 @@ int g_test_popup_erase_calls = 0;
 int g_test_last_measure_type = -1;
 int g_test_last_measure_id = -1;
 int g_test_last_measure_height = -1;
+int g_test_measure_by_type[8] = {};
 #endif
 std::vector<xfx::CatalogItem> g_test_catalog;
 unsigned int g_test_catalog_scan_count = 0;
@@ -4619,6 +4620,12 @@ ComboFaceContent combo_face_content(HDC dc,RECT rect,int dpi,const wchar_t* labe
         static_cast<float>(left+text_width+gap)+arrow_width*.5f,(rect.top+rect.bottom)*.5f};
 }
 
+// Sent to a combo after its list opens. Sized from the row height and the item count, so a
+// list that Windows sized to nothing (the white 2-pixel bar that was reported) still shows
+// its rows. Lowering the maximum only makes a long list scroll; it never hides rows.
+constexpr UINT kFixComboPopupHeight = WM_APP + 0x21;
+void size_combo_popup(HWND combo);
+
 void draw_combo_face(HWND hwnd, HDC dc) {
     const int saved = SaveDC(dc);
     RECT rect{}; GetClientRect(hwnd, &rect);
@@ -4656,6 +4663,7 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
     // A closed dropdown must not react to the wheel: scrolling the settings page used to
     // silently change the selected shortcut. The open list keeps its normal scrolling.
     if (message == WM_MOUSEWHEEL && !SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0)) return TRUE;
+    if (message == kFixComboPopupHeight) { size_combo_popup(hwnd); return 0; }
     if(message==WM_NCDESTROY) {RemoveWindowSubclass(hwnd,combo_face_proc,id);return DefSubclassProc(hwnd,message,wp,lp);}
     if(message==WM_ERASEBKGND) return TRUE;
     if(message==WM_PAINT || message==WM_PRINTCLIENT) {
@@ -4670,6 +4678,8 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
     // is excluded: the closed face does not change, and a synchronous full repaint at that
     // moment is exactly the flash seen when the list is opened and closed quickly.
     const bool opening_popup = message == CB_SHOWDROPDOWN && wp != 0;
+    if (opening_popup && IsWindow(hwnd)) PostMessageW(hwnd, kFixComboPopupHeight, 0, 0);
+    if (message == kFixComboPopupHeight) { size_combo_popup(hwnd); return 0; }
     const bool native_face_update = !opening_popup &&
         (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == CB_SETCURSEL ||
          message == CB_SHOWDROPDOWN || message == WM_ENABLE || message == WM_LBUTTONDOWN ||
@@ -4684,16 +4694,48 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
 }
 
 constexpr UINT_PTR kComboPopupSubclassId = 0xB008;
+void size_combo_popup(HWND combo) {
+    if (!combo || !IsWindow(combo)) return;
+    if (!SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0)) return;
+    COMBOBOXINFO info{sizeof(info)};
+    if (!GetComboBoxInfo(combo, &info) || !info.hwndList || !IsWindow(info.hwndList)) return;
+    const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    if (count <= 0) return;
+    int row = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0));
+    if (row <= 0) row = MulDiv(26, GetDpiForWindow(combo), 96);
+    const int visible = (std::min)(count, (std::max)(3, (std::min)(count, 10)));
+    const int wanted = row * visible + MulDiv(2, GetDpiForWindow(combo), 96);
+    RECT bounds{};
+    if (!GetWindowRect(info.hwndList, &bounds)) return;
+    const int height = bounds.bottom - bounds.top;
+    if (height >= wanted) return;
+    SetWindowPos(info.hwndList, nullptr, 0, 0, bounds.right - bounds.left, wanted,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    update_trace("combo-popup-sized from=" + std::to_string(height) +
+        " to=" + std::to_string(wanted));
+}
+
 
 // Clips a dropdown popup to a rounded rectangle. The rows and the closed face are
 // already rounded; without this the list window itself still had square corners.
 void round_combo_popup(HWND popup) {
     if (!popup || !IsWindow(popup)) return;
+    // SetWindowRgn can repaint the popup, which re-enters the resize path that calls this.
+    static thread_local bool inside = false;
+    if (inside) return;
+    struct Guard { bool& flag; ~Guard() { flag = false; } } guard{inside};
+    inside = true;
     RECT client{};
     if (!GetClientRect(popup, &client)) return;
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
     if (width <= 0 || height <= 0) return;
+    // A window that already has a region of the right size and shape needs no new one;
+    // re-applying it on every resize message is what re-entered here.
+    RECT existing{};
+    if (GetWindowRgnBox(popup, &existing) != ERROR &&
+        existing.right - existing.left == width &&
+        existing.bottom - existing.top == height) return;
     const int radius = (std::max)(2, ui_px(6));
     HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
     if (!region) return;
@@ -4706,18 +4748,17 @@ LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
 #ifdef XFX_CONSOLE_TEST
     if (message == WM_ERASEBKGND) ++g_test_popup_erase_calls;
 #endif
-    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE) {
-        // The popup is resized each time it opens, so the region must follow.
-        round_combo_popup(hwnd);
-    }
+
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, combo_popup_proc, id);
         return DefSubclassProc(hwnd, message, wp, lp);
     }
+    // The popup is resized every time it opens; the rounded region follows. Sizing is
+    // handled by size_combo_popup, which runs after the list is up.
+    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE) round_combo_popup(hwnd);
     if (message == WM_ERASEBKGND) {
-        // Always the last chance before painting: the popup has its final size here, so
-        // this is where the rounded window region is guaranteed to be current.
         round_combo_popup(hwnd);
+
         RECT rect{};
         GetClientRect(hwnd, &rect);
         FillRect(reinterpret_cast<HDC>(wp), &rect, g_state->input_brush);
@@ -5094,10 +5135,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (!combo) continue;
             SetWindowSubclass(combo, combo_face_proc, 0xB005, 0);
             SendMessageW(combo, CB_SETITEMHEIGHT, 0, MulDiv(26, GetDpiForWindow(hwnd), 96));
-            // Always show at least eight rows. The default calculation can collapse the
-            // list to a couple of pixels when the parent is small, which looks exactly
-            // like an empty white dropdown.
-            SendMessageW(combo, CB_SETMINVISIBLE, 8, 0);
         }
         // Theme every popup now. Waiting for CBN_DROPDOWN meant a list opened without a
         // real click (keyboard, automation, the first open after startup) stayed unthemed
@@ -5285,6 +5322,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_test_last_measure_type = static_cast<int>(measure->CtlType);
         g_test_last_measure_id = static_cast<int>(measure->CtlID);
         g_test_last_measure_height = static_cast<int>(measure->itemHeight);
+        if (measure->CtlType < 8) ++g_test_measure_by_type[measure->CtlType];
+        g_test_last_measure_id = static_cast<int>(measure->CtlID);
 #endif
         if (measure->CtlType == ODT_LISTBOX && measure->CtlID == kResultsId) {
             measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;

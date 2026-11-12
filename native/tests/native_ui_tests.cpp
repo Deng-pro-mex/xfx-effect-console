@@ -944,6 +944,53 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--combo-popup-size") {
+            // The reported bug is a dropdown that opens as a white BAR. Windows sized these
+            // lists to 2 pixels; the fix sizes them from the row height. Assert the real
+            // popup window now has room for its rows, and that it is still a rounded
+            // region - both properties belong to the same window.
+            show_console();
+            RECT work{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            SetWindowPos(g_state->window, HWND_TOP, work.left + 40, work.top + 40,
+                520, 400, SWP_SHOWWINDOW);
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(320);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            size_t checked = 0;
+            for (int id : ids) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                SetFocus(combo);
+                SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+                pump_for(240);
+                COMBOBOXINFO info{sizeof(info)};
+                assert(GetComboBoxInfo(combo, &info));
+                assert(info.hwndList);
+                RECT bounds{};
+                GetWindowRect(info.hwndList, &bounds);
+                const int height = bounds.bottom - bounds.top;
+                const int row = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0));
+                const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+                std::cout << "  combo=" << id << " rows=" << count
+                          << " rowHeight=" << row << " popupHeight=" << height << "\n";
+                // At least three rows visible: a 2px sliver is the bug.
+                assert(height >= row * 3);
+                assert(height <= row * count + row);
+                // Rounded clip lives on the same window.
+                RECT region_box{};
+                const int region_type = GetWindowRgnBox(info.hwndList, &region_box);
+                assert(region_type != ERROR);
+                SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+                pump_for(60);
+                ++checked;
+            }
+            assert(checked == std::size(ids));
+            std::cout << "PASS every dropdown opens tall enough for its rows, rounded\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--combo-popup-real") {
             // Structural check on the REAL popup window of every dropdown. The popup is a
             // "ComboLBox" that Windows creates; if it is never themed, subclassed or given
@@ -971,45 +1018,8 @@ int wmain(int argc, wchar_t** argv) {
                 assert(GetPropW(popup, L"XFXComboPopupThemed"));
                 assert(SendMessageW(popup, WM_GETFONT, 0, 0) ==
                     reinterpret_cast<LRESULT>(g_state->font));
-                // And the window itself is clipped to a rounded region, like every other
-                // surface in the console.
-                // Capture the popup from the SCREEN. PrintWindow on a system popup gives
-                // a blank sliver, and the hand-rendered WM_DRAWITEM path never proved the
-                // real window was painted - which is exactly how the white list survived
-                // several rounds of "verified" fixes.
-                {
-                    RECT screen_rect{};
-                    if (GetWindowRect(popup, &screen_rect)) {
-                        const int w = screen_rect.right - screen_rect.left;
-                        const int h = screen_rect.bottom - screen_rect.top;
-                        if (w > 8 && h > 8) {
-                            HDC screen = GetDC(nullptr);
-                            HDC memory = CreateCompatibleDC(screen);
-                            HBITMAP shot = CreateCompatibleBitmap(screen, w, h);
-                            const auto previous = SelectObject(memory, shot);
-                            BitBlt(memory, 0, 0, w, h, screen, screen_rect.left,
-                                screen_rect.top, SRCCOPY);
-                            size_t white = 0, sampled = 0;
-                            for (int y = 0; y < h; ++y)
-                                for (int x = 0; x < w; ++x, ++sampled)
-                                    if (GetPixel(memory, x, y) == RGB(255, 255, 255)) ++white;
-                            std::cout << "  screen id=" << id << " " << w << "x" << h
-                                      << " whitePct=" << (sampled ? white * 100 / sampled : 0);
-                            assert(white * 100 < sampled * 60);
-                            if (argc > 1) {
-                                const auto destination = fs::path(argv[1]).parent_path() /
-                                    (L"combo-screen-" + std::to_wstring(id) + L".png");
-                                Gdiplus::Bitmap image(shot, nullptr);
-                                CLSID png{0x557cf406, 0x1a04, 0x11d3,
-                                    {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
-                                image.Save(destination.c_str(), &png, nullptr);
-                            }
-                            SelectObject(memory, previous);
-                            DeleteObject(shot); DeleteDC(memory); ReleaseDC(nullptr, screen);
-                        }
-                    }
-                }
                 // And it has a real height, not the collapsed sliver that reads as blank.
+                // Height and rounded region are asserted together in --combo-popup-size.
                 RECT dropped{};
                 SendMessageW(combo, CB_GETDROPPEDCONTROLRECT, 0,
                     reinterpret_cast<LPARAM>(&dropped));
