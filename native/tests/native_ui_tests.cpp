@@ -732,6 +732,42 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--slot-row-click-bind") {
+            // Select a result, then click an EMPTY second-strip cell. That is the natural
+            // gesture for "bind this to the second row" and it used to report the slot as
+            // empty instead of binding.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            const int row_count = static_cast<int>(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0));
+            assert(row_count > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            assert(selected_row_can_bind());
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, 0, 0);
+            const auto expected = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+            // Click cell 7, which is empty.
+            assert(IsWindowVisible(g_state->slot_row_buttons[7]));
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowFirstId + 7, BN_CLICKED),
+                reinterpret_cast<LPARAM>(g_state->slot_row_buttons[7]));
+            pump();
+            assert(g_state->settings.row_slots[7] == expected);
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[7] == expected);
+            // Clicking it again must RUN it, not overwrite the binding with a different row.
+            const auto before_second_click = g_state->settings.row_slots[7];
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowFirstId + 7, BN_CLICKED),
+                reinterpret_cast<LPARAM>(g_state->slot_row_buttons[7]));
+            pump();
+            assert(g_state->settings.row_slots[7] == before_second_click);
+            std::cout << "PASS clicking an empty second-strip cell binds, a filled one runs\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--slot-row-menu") {
             show_console();
             g_state->settings.show_slot_row = true;

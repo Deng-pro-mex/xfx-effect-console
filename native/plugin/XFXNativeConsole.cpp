@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.21";
+constexpr char kProductVersion[] = "1.5.22";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -5775,7 +5775,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (LOWORD(wparam) >= kSlotRowFirstId &&
             LOWORD(wparam) < kSlotRowFirstId + 9 && HIWORD(wparam) == BN_CLICKED) {
             const int index = LOWORD(wparam) - kSlotRowFirstId;
+            const bool occupied = !g_state->settings.row_slots[static_cast<size_t>(index)].empty();
+            // Clicking an EMPTY cell binds the effect selected in the results list; that is
+            // the obvious gesture and previously did nothing but report the slot as empty.
+            // Clicking an OCCUPIED cell runs it, and Shift+click always binds (overwrite).
             if (GetKeyState(VK_SHIFT) & 0x8000) assign_row_slot(index);
+            else if (!occupied) assign_row_slot(index);
             else {
                 const auto reply = execute_row_slot(index);
                 if (!reply.pending) set_status(utf8_to_wide(reply.message.c_str()), reply.succeeded);
