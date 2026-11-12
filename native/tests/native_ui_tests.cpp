@@ -662,6 +662,42 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-capture-lost") {
+            // AE can activate its own window mid-drag, which steals the mouse capture while
+            // the button is still down. The pointer is already over a strip cell, so the
+            // drop must bind then and there instead of waiting for a release that will go
+            // to another window.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.row_slots[4].clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            assert(IsWindowVisible(g_state->slot_row_buttons[4]));
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[4], &cell));
+            g_test_drag_cursor = POINT{cell.left + 5, cell.top + 5};
+            g_test_drag_button_held = true;      // still held down
+            ReleaseCapture();                    // another window took it
+            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            pump();
+            assert(!g_state->result_drag_armed);
+            assert(!g_state->settings.row_slots[4].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[4] ==
+                g_state->settings.row_slots[4]);
+            std::cout << "PASS a drag that loses capture over a cell still binds\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-release-away") {
             // A real drag can end without the list ever seeing WM_LBUTTONUP: the release
             // goes to whatever window is under the cursor. The poll timer is what catches

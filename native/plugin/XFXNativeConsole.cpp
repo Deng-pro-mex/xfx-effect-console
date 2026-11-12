@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.19";
+constexpr char kProductVersion[] = "1.5.20";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1790,6 +1790,28 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
             return 0;
         }
+        // Capture was stolen while the button is still down (AE can activate its own
+        // window mid-gesture). The drop must bind as soon as the pointer is over a cell,
+        // otherwise the gesture silently does nothing.
+        if (GetCapture() != hwnd && g_state->result_drag_target >= 0) {
+            const int drop_target = g_state->result_drag_target;
+            const int drag_row = g_state->result_drag_row;
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            g_state->result_drag_target = -1;
+            KillTimer(hwnd, kResultDragTimerId);
+            repaint_slot_row_cells();
+            if (g_state->result_click_redraw_held) {
+                g_state->result_click_redraw_held = false;
+                if (IsWindow(hwnd)) SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+            }
+            g_state->result_click_pending = false;
+            g_state->result_click_row = -1;
+            g_state->result_click_action = ResultAction::None;
+            update_trace("drag-bind-lost-capture target=" + std::to_string(drop_target));
+            if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
+            return 0;
+        }
         update_result_drag_target();
         return 0;
     }
@@ -2013,7 +2035,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             update_trace("drag-capture-changed target=" + std::to_string(stolen_target) +
                 " row=" + std::to_string(stolen_row) +
                 " pending=" + (g_state->result_click_pending ? "1" : "0"));
-            if (stolen_target >= 0 && stolen_row >= 0 && !g_state->result_click_pending) {
+            if (stolen_target >= 0 && stolen_row >= 0) {
                 g_state->result_drag_armed = false;
                 g_state->result_drag_row = -1;
                 g_state->result_drag_target = -1;
