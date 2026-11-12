@@ -649,7 +649,7 @@ int wmain(int argc, wchar_t** argv) {
             // Pointer stays over the list the whole time: no strip cell, no drag.
             g_test_drag_button_held = false;
             g_test_drag_cursor = POINT{0, 0};
-            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            SendMessageW(g_state->window, WM_TIMER, kResultDragTimerId, 0);
             g_test_drag_button_held.reset();
             g_test_drag_cursor.reset();
             assert(g_state->result_drag_armed);          // untouched by the timer
@@ -686,7 +686,7 @@ int wmain(int argc, wchar_t** argv) {
             g_test_drag_cursor = POINT{cell.left + 5, cell.top + 5};
             g_test_drag_button_held = true;      // still held down
             ReleaseCapture();                    // another window took it
-            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            SendMessageW(g_state->window, WM_TIMER, kResultDragTimerId, 0);
             g_test_drag_button_held.reset();
             g_test_drag_cursor.reset();
             pump();
@@ -720,7 +720,7 @@ int wmain(int argc, wchar_t** argv) {
             assert(GetWindowRect(g_state->slot_row_buttons[6], &cell));
             g_test_drag_cursor = POINT{cell.left + 6, cell.top + 6};
             g_test_drag_button_held = false;   // the button is already up
-            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            SendMessageW(g_state->window, WM_TIMER, kResultDragTimerId, 0);
             g_test_drag_button_held.reset();
             g_test_drag_cursor.reset();
             pump();

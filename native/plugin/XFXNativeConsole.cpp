@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.20";
+constexpr char kProductVersion[] = "1.5.21";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -145,7 +145,9 @@ constexpr int kToolbarCenterY = 28;
 constexpr int kToolbarButtonSize = 36;
 constexpr int kToolbarGap = 4;
 constexpr UINT_PTR kDragTimerId = 0xD001;
-// Polls the real cursor while a result is being dragged to the second strip.
+// Polls the real cursor while a result is being dragged to the second strip. The timer is
+// owned by the MAIN window, not the results list: the list is destroyed and recreated when
+// the search box empties or fills, and a timer on it would silently disappear mid-drag.
 constexpr UINT_PTR kResultDragTimerId = 0xD002;
 constexpr UINT kDragHoldMs = 280;
 constexpr int kDragEdge = 14;
@@ -1066,6 +1068,21 @@ void repaint_slot_row_cells() {
 
 // Follows the real cursor. A drag can receive coalesced or filtered moves, so the
 // reported position is not trustworthy; the cursor always is.
+void handle_drag_poll();
+
+HWND drag_timer_owner() {
+    if (g_state && IsWindow(g_state->window)) return g_state->window;
+    return nullptr;
+}
+void start_drag_poll() {
+    const HWND owner = drag_timer_owner();
+    if (owner) SetTimer(owner, kResultDragTimerId, 30, nullptr);
+}
+void stop_drag_poll() {
+    const HWND owner = drag_timer_owner();
+    if (owner) KillTimer(owner, kResultDragTimerId);
+}
+
 void update_result_drag_target() {
     if (!g_state) return;
     POINT cursor{};
@@ -1698,6 +1715,63 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
     });
 }
 
+// One tick of the drag poll. Owned by the main window so it survives the results list
+// being recreated, but the work is identical wherever it is called from.
+void handle_drag_poll() {
+    if (!g_state) return;
+    if (!g_state->result_drag_armed) { stop_drag_poll(); return; }
+    // Sample the real cursor before deciding anything: the release can arrive before
+    // any WM_MOUSEMOVE has been delivered, and the target must be known by then.
+    update_result_drag_target();
+    const HWND list = g_state->results;
+    if (!drag_button_is_held()) {
+        // The button came up without the list seeing WM_LBUTTONUP (the release went to
+        // another window). Finish the drop here instead of losing the drag. When the
+        // pointer never reached a cell this is an ordinary click, so leave the click
+        // state untouched for WM_LBUTTONUP to handle.
+        stop_drag_poll();
+        if (g_state->result_drag_target < 0) return;
+        const int drop_target = g_state->result_drag_target;
+        const int drag_row = g_state->result_drag_row;
+        g_state->result_drag_armed = false;
+        g_state->result_drag_row = -1;
+        g_state->result_drag_target = -1;
+        repaint_slot_row_cells();
+        if (list && GetCapture() == list) ReleaseCapture();
+        if (g_state->result_click_redraw_held) {
+            g_state->result_click_redraw_held = false;
+            if (list && IsWindow(list)) SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+        }
+        g_state->result_click_pending = false;
+        g_state->result_click_row = -1;
+        g_state->result_click_action = ResultAction::None;
+        update_trace("drag-bind-release-away target=" + std::to_string(drop_target));
+        if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
+        return;
+    }
+    // Capture was stolen while the button is still down (AE can activate its own window
+    // mid-gesture). The drop must bind as soon as the pointer is over a cell, otherwise
+    // the gesture silently does nothing.
+    if ((!list || GetCapture() != list) && g_state->result_drag_target >= 0) {
+        const int drop_target = g_state->result_drag_target;
+        const int drag_row = g_state->result_drag_row;
+        g_state->result_drag_armed = false;
+        g_state->result_drag_row = -1;
+        g_state->result_drag_target = -1;
+        stop_drag_poll();
+        repaint_slot_row_cells();
+        if (g_state->result_click_redraw_held) {
+            g_state->result_click_redraw_held = false;
+            if (list && IsWindow(list)) SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+        }
+        g_state->result_click_pending = false;
+        g_state->result_click_row = -1;
+        g_state->result_click_action = ResultAction::None;
+        update_trace("drag-bind-lost-capture target=" + std::to_string(drop_target));
+        if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
+    }
+}
+
 LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     return guarded_callback([&]() -> LRESULT {
     if (message == WM_ERASEBKGND) {
@@ -1758,61 +1832,11 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         // A slow drag can move without generating another WM_MOUSEMOVE for the list
         // (the pointer crosses a child window and the moves go there). Poll while the
         // button is held so the highlight keeps up and the release resolves.
-        SetTimer(hwnd, kResultDragTimerId, 30, nullptr);
+        start_drag_poll();
         return 0;
     }
     if (message == WM_TIMER && wparam == kResultDragTimerId) {
-        if (!g_state->result_drag_armed) { KillTimer(hwnd, kResultDragTimerId); return 0; }
-        // Sample the real cursor before deciding anything: the release can arrive before
-        // any WM_MOUSEMOVE has been delivered, and the target must be known by then.
-        update_result_drag_target();
-        if (!drag_button_is_held()) {
-            // The button came up without the list seeing WM_LBUTTONUP (the release went to
-            // another window). Finish the drop here instead of losing the drag. When the
-            // pointer never reached a cell this is an ordinary click, so leave the click
-            // state untouched for WM_LBUTTONUP to handle.
-            KillTimer(hwnd, kResultDragTimerId);
-            if (g_state->result_drag_target < 0) return 0;
-            const int drop_target = g_state->result_drag_target;
-            const int drag_row = g_state->result_drag_row;
-            g_state->result_drag_armed = false;
-            g_state->result_drag_row = -1;
-            g_state->result_drag_target = -1;
-            repaint_slot_row_cells();
-            if (GetCapture() == hwnd) ReleaseCapture();
-            if (g_state->result_click_redraw_held) {
-                g_state->result_click_redraw_held = false;
-                if (IsWindow(hwnd)) SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
-            }
-            g_state->result_click_pending = false;
-            g_state->result_click_row = -1;
-            g_state->result_click_action = ResultAction::None;
-            if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
-            return 0;
-        }
-        // Capture was stolen while the button is still down (AE can activate its own
-        // window mid-gesture). The drop must bind as soon as the pointer is over a cell,
-        // otherwise the gesture silently does nothing.
-        if (GetCapture() != hwnd && g_state->result_drag_target >= 0) {
-            const int drop_target = g_state->result_drag_target;
-            const int drag_row = g_state->result_drag_row;
-            g_state->result_drag_armed = false;
-            g_state->result_drag_row = -1;
-            g_state->result_drag_target = -1;
-            KillTimer(hwnd, kResultDragTimerId);
-            repaint_slot_row_cells();
-            if (g_state->result_click_redraw_held) {
-                g_state->result_click_redraw_held = false;
-                if (IsWindow(hwnd)) SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
-            }
-            g_state->result_click_pending = false;
-            g_state->result_click_row = -1;
-            g_state->result_click_action = ResultAction::None;
-            update_trace("drag-bind-lost-capture target=" + std::to_string(drop_target));
-            if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
-            return 0;
-        }
-        update_result_drag_target();
+        handle_drag_poll();
         return 0;
     }
     if (message == WM_MOUSEMOVE) {
@@ -1897,7 +1921,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             update_trace("drag-arm row=" + std::to_string(row));
             // Poll from the first moment. Waiting for a WM_MOUSEMOVE is what lost the
             // drop whenever the pointer left the list without generating one.
-            SetTimer(hwnd, kResultDragTimerId, 30, nullptr);
+            start_drag_poll();
             SetFocus(hwnd);
             SetCapture(hwnd);
             return 0;
@@ -1913,7 +1937,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             g_state->result_drag_target = -1;
-            KillTimer(hwnd, kResultDragTimerId);
+            stop_drag_poll();
             repaint_slot_row_cells();
             if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
             else if (drop_target < 0 && drag_row >= 0 && !IsWindowVisible(g_state->slot_row_buttons[0]))
@@ -1941,7 +1965,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             g_state->result_drag_target = -1;
-            KillTimer(hwnd, kResultDragTimerId);
+            stop_drag_poll();
             if (GetCapture() == hwnd) ReleaseCapture();
 
             const auto restore_redraw = [&](bool update) {
@@ -2248,7 +2272,7 @@ void update_results_list_style(bool shortcut_mode) {
         if (GetCapture() == old) ReleaseCapture();
         // The poll timer is owned by this window, so it dies with it. Clear the drag state
         // too, or the next window would think a drag from the old one is still running.
-        KillTimer(old, kResultDragTimerId);
+        stop_drag_poll();
         g_state->result_drag_armed = false;
         g_state->result_drag_row = -1;
         g_state->result_drag_target = -1;
@@ -4944,6 +4968,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 layout_controls(hwnd);
                 KillTimer(hwnd, kSettingsAnimationTimerId);
             }
+            return 0;
+        }
+        if (wparam == kResultDragTimerId) {
+            handle_drag_poll();
             return 0;
         }
         if (wparam == kDragTimerId && g_state->drag_pending) {
