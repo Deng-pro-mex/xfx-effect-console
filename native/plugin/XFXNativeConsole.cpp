@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.13";
+constexpr char kProductVersion[] = "1.5.14";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1884,6 +1884,20 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_click_pending = false;
             g_state->result_click_row = -1;
             g_state->result_click_action = ResultAction::None;
+            // A drop on the second strip binds the dragged result there. This is the
+            // documented way to fill the strip, and it must win over the apply path.
+            // The target MUST be read before ReleaseCapture: that call sends
+            // WM_CAPTURECHANGED straight back into this window, whose handler resolves
+            // and clears the drag, so reading afterwards always found -1 and the bind
+            // silently never happened.
+            update_result_drag_target();
+            const int drop_target = g_state->result_drag_target;
+            const int drop_row = g_state->result_drag_row >= 0 ?
+                g_state->result_drag_row : pending_row;
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            g_state->result_drag_target = -1;
+            KillTimer(hwnd, kResultDragTimerId);
             if (GetCapture() == hwnd) ReleaseCapture();
 
             const auto restore_redraw = [&](bool update) {
@@ -1897,17 +1911,10 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 }
             };
 
-            // A drop on the second strip binds the dragged result there. This is the
-            // documented way to fill the strip, and it must win over the apply path.
-            update_result_drag_target();
-            const int drop_target = g_state->result_drag_target;
-            g_state->result_drag_armed = false;
-            g_state->result_drag_row = -1;
-            g_state->result_drag_target = -1;
             repaint_slot_row_cells();
             if (drop_target >= 0) {
-                SendMessageW(hwnd, LB_SETCURSEL, pending_row, 0);
-                assign_row_slot_dragged(drop_target, pending_row);
+                SendMessageW(hwnd, LB_SETCURSEL, drop_row, 0);
+                assign_row_slot_dragged(drop_target, drop_row);
                 restore_redraw(true);
                 RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
                 return 0;
@@ -6252,6 +6259,9 @@ extern "C" DllExport AEGP_PluginInitFuncPrototype EntryPointFunc;
 
 A_Err EntryPointFunc(SPBasicSuite* pica_basicP, A_long, A_long,
                      AEGP_PluginID aegp_plugin_id, AEGP_GlobalRefcon* global_refconP) {
+    // Prove which build the host actually loaded. A stale plugin on disk and a broken
+    // fix are indistinguishable from the user's side; this line settles it.
+    update_trace(std::string("plugin-loaded version=") + kProductVersion);
     g_basic = pica_basicP;
     g_plugin_id = aegp_plugin_id;
     try {
