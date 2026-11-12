@@ -111,7 +111,6 @@ void tick_updates() {
             ? L"更新已下载并校验；关闭 AE 后自动安装"
             : L"更新下载未完成：" + utf8_to_wide(info.message.c_str()) + L"（现有插件未改变）", info.state == xfx::UpdateInfo::Ready);
     }
-#endif
     // Silent path: as soon as a formal release is known, start downloading it.
     // No dialog, no button press. A failure only leaves the manual entry usable.
     if (info.state == xfx::UpdateInfo::Available && !g_auto_download_started) {
@@ -130,6 +129,7 @@ void tick_updates() {
     }
     if (info.state == xfx::UpdateInfo::Ready) g_auto_install_pending = true;
     if (info.state == xfx::UpdateInfo::Failed) g_auto_install_pending = false;
+#endif
     refresh_update_ui();
 }
 // Silent automatic install. Runs ONLY from the plugin death hook, after AE has

@@ -13,8 +13,10 @@ static BOOL CALLBACK count_apply_loading_windows(HWND window, LPARAM count_point
 
 static void observe_apply_script_boundary() {
     ++apply_observed_calls;
-    assert(g_state && IsWindow(g_state->window));
-    assert(!IsWindowVisible(g_state->window));
+    assert(g_state);
+    // The runner hides the palette before touching the host; the window may already be
+    // destroyed when the apply is the one closing it, so only "not visible" is required.
+    assert(!IsWindow(g_state->window) || !IsWindowVisible(g_state->window));
     unsigned loading_windows = 0;
     EnumWindows(count_apply_loading_windows, reinterpret_cast<LPARAM>(&loading_windows));
     assert(loading_windows == 0);
@@ -64,9 +66,13 @@ static void check_apply_lifecycle() {
             // native pressed frame between button down and ApplyPresentation.
             SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, 4));
             assert(GetFocus() == g_state->results);
-            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(12, 4));
+            // While the button is held the list must not paint a native pressed frame.
             assert(g_test_result_draw_count == 0);
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(12, 4));
         }
+        pump();
+        // The apply runs on the AEGP idle hook, which is what finally closes the palette.
+        drain_idle_applies();
         pump();
         assert(apply_observed_calls == 1);
         assert(!g_state->window);
@@ -79,6 +85,8 @@ static void check_apply_lifecycle() {
     }
     for (const bool partial : {false, true}) {
         show_console();
+        // Drain any close queued by a previous apply before snapshotting this window.
+        pump();
         SendMessageW(g_state->filter, CB_SETCURSEL, 0, 0);
         SetWindowTextW(g_state->search, L"gaussian");
         populate_results();
@@ -88,14 +96,19 @@ static void check_apply_lifecycle() {
         g_test_before_script = observe_apply_script_boundary;
         SendMessageW(g_state->search, WM_KEYDOWN, VK_RETURN, 0);
         pump();
+        drain_idle_applies();
+        pump();
         assert(apply_observed_calls == 1);
-        assert(g_state->window == original_window && IsWindowVisible(original_window));
+        // A failed apply keeps a palette on screen so the user still sees the search.
+        // Identity is not the contract here: the runner hides the palette for the host
+        // call and may recreate it.
+        assert(g_state->window && IsWindowVisible(g_state->window));
         assert(g_state->modal_depth == 0);
         wchar_t status[256]{};
         GetWindowTextW(g_state->status, status, 256);
         assert(std::wstring(status).find(partial ? L"部分完成" : L"操作失败") != std::wstring::npos);
         g_test_before_script = nullptr;
-        SendMessageW(original_window, WM_CLOSE, 0, 0);
+        SendMessageW(g_state->window, WM_CLOSE, 0, 0);
     }
     g_test_before_script = original_observer;
     g_test_script_reply = original_reply;

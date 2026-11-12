@@ -90,6 +90,9 @@ constexpr int kResultDigitKeyId = 1073;
 constexpr int kResultDigitHintId = 1074;
 constexpr int kSlotRowCaptionId = 1075;
 constexpr int kResultDigitCaptionId = 1076;
+constexpr int kLibraryCaptionId = 1079;
+constexpr int kImeCaptionId = 1077;
+constexpr int kThemeCaptionId = 1078;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
 constexpr int kDiagnosticLogId = 1043;
@@ -124,12 +127,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.4.4";
+constexpr char kProductVersion[] = "1.4.5";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 244;
+constexpr int kSettingsHeight = 272;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -621,6 +624,9 @@ struct PluginState {
     std::array<HWND, 9> layer_style_buttons{};
     std::array<HWND, 9> slot_row_buttons{};
     HWND slot_row_caption = nullptr;
+    HWND library_caption = nullptr;
+    HWND ime_caption = nullptr;
+    HWND theme_caption = nullptr;
     HWND result_digit_caption = nullptr;
     HWND slot_row_checkbox = nullptr;
     HWND slot_row_key = nullptr;
@@ -1733,10 +1739,18 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         const UINT scan = static_cast<UINT>((lparam >> 16) & 0xFF);
         const bool from_main_row = scan >= 0x02 && scan <= 0x0A;
         const bool from_keypad = scan >= 0x47 && scan <= 0x53;
-        if (from_main_row && g_state->settings.result_digit_shortcut &&
-            current_modifiers() == modifier_from_text(g_state->settings.result_digit_modifier) &&
-            !g_state->settings_visible && !shortcut_list_mode()) {
-            return 0;   // apply-only: the digit must never be typed
+        if (from_main_row && !g_state->settings_visible) {
+            // The digit has already been routed by WM_KEYDOWN. Whichever shortcut owns it
+            // in the current mode - the favourites strip or the Nth-result shortcut - the
+            // character must never reach the text, or the search box fills with numbers.
+            const int slot = static_cast<int>(wparam - L'1');
+            const bool strip_owns = g_state->settings.show_slot_row && slot < 9 &&
+                current_modifiers() == modifier_from_text(g_state->settings.slot_row_modifier) &&
+                !g_state->settings.row_slots[static_cast<size_t>(slot)].empty();
+            const bool results_own = !shortcut_list_mode() &&
+                g_state->settings.result_digit_shortcut &&
+                current_modifiers() == modifier_from_text(g_state->settings.result_digit_modifier);
+            if (strip_owns || results_own) return 0;
         }
         if (from_keypad) {
             // Explicitly let the edit control receive it; nothing may consume it.
@@ -2578,6 +2592,10 @@ bool run_pending_apply_on_idle() {
     // is released, not closed, so the palette returns afterwards.
     const HWND console_window = g_state ? g_state->window : nullptr;
     const bool console_was_visible = console_window && IsWindowVisible(console_window);
+    // Mark the apply as in flight BEFORE hiding the palette and pumping messages. The
+    // teardown path treats "hidden" as "the user closed it", so without this the queued
+    // close destroys the palette mid-apply and a failed apply loses the console.
+    if (g_state) g_state->applying_item = true;
     if (console_was_visible) ShowWindow(console_window, SW_HIDE);
     if (GetCapture() == console_window || (console_window && IsChild(console_window, GetCapture())))
         ReleaseCapture();
@@ -2586,15 +2604,23 @@ bool run_pending_apply_on_idle() {
     ModalGuard modal;
     struct Presentation {
         HWND window = g_state ? g_state->window : nullptr;
-        bool was_visible = window && IsWindowVisible(window);
+        // Visibility must be the state from BEFORE the runner hid the palette for the
+        // host call, otherwise a failed apply never brings the console back.
+        bool was_visible = false;
         bool close_console = true;
+        bool applied = false;
         ~Presentation() {
             if (!g_state) return;
             g_state->applying_item = false;
-            if (close_console && IsWindow(window)) PostMessageW(window, WM_CLOSE, 0, 0);
+            // Close only when the apply actually succeeded. A failure keeps the palette
+            // open so the user still sees the search and the reason it failed.
+            // Close here rather than posting WM_CLOSE: a queued close can outlive this
+            // window and destroy a palette opened later in the same session.
+            if (close_console && applied && IsWindow(window)) SendMessageW(window, WM_CLOSE, 0, 0);
             else if (was_visible && IsWindow(window)) show_console(true);
         }
     } presentation;
+    presentation.was_visible = console_was_visible;
     presentation.close_console = job.close_console;
     if (g_state) g_state->applying_item = true;
     if (job.close_console && presentation.was_visible) {
@@ -2603,6 +2629,7 @@ bool run_pending_apply_on_idle() {
     }
     if (g_state) { g_state->ime.restore(); g_state->ime_session_active = false; }
     const auto reply = run_ae_script_now(job.script, false);
+    presentation.applied = reply.succeeded;
     if (reply.pending) {
         // The precheck inside run_ae_script_now parked it again; nothing to report yet.
         return true;
@@ -2613,9 +2640,10 @@ bool run_pending_apply_on_idle() {
         recent.insert(recent.begin(), job.item_key);
         if (recent.size() > 20) recent.resize(20);
     }
-    if (reply.succeeded || reply.count) {
+    if (reply.succeeded && !reply.partial) {
         set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
     } else {
+        // Partial is not success: keep the palette open and name what failed.
         set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
     }
     return true;
@@ -3394,48 +3422,6 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
     }
     if (message == WM_DRAWITEM) {
         const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
-        if (draw->CtlType == ODT_BUTTON &&
-            draw->CtlID >= kSlotRowFirstId && draw->CtlID < kSlotRowFirstId + 9) {
-            // Mirrors the first strip's painting exactly, statement for statement. The
-            // first strip is left untouched; this copy exists so the rows match without
-            // changing the shipped behaviour of the original.
-            const size_t index = static_cast<size_t>(draw->CtlID - kSlotRowFirstId);
-            std::wstring name;
-            const auto& key = g_state->settings.row_slots[index];
-            if (!key.empty()) {
-                for (const auto& item : g_state->catalog) {
-                    if (item_key(item) == key) { name = item_display_label(item); break; }
-                }
-            }
-            const int width = draw->rcItem.right - draw->rcItem.left;
-            const int height = draw->rcItem.bottom - draw->rcItem.top;
-            if (width <= 0 || height <= 0) return TRUE;
-            const auto hovered_entry = g_state->button_hovers.find(g_state->slot_row_buttons[index]);
-            const bool hovered = hovered_entry != g_state->button_hovers.end() &&
-                hovered_entry->second.hovered;
-            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
-            RECT card = draw->rcItem; InflateRect(&card, -2, -2);
-            xfx::paint_round_rect(draw->hDC, card,
-                selected ? colors().selected : hovered ? colors().button : colors().surface,
-                static_cast<float>(ui_px(3)),
-                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
-            const auto px=[draw](int v){return MulDiv(v,GetDpiForWindow(draw->hwndItem),96);};
-            RECT number = card; number.left += px(3); number.right -= px(3);
-            number.top += px(1); number.bottom = number.top + px(10);
-            const auto previous_font = SelectObject(draw->hDC,
-                g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
-            SetBkMode(draw->hDC, TRANSPARENT);
-            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
-            DrawTextW(draw->hDC, slot_number_text(static_cast<int>(index),
-                g_state->settings.slot_row_modifier).c_str(), -1, &number, DT_LEFT | DT_SINGLELINE);
-            SelectObject(draw->hDC, previous_font);
-            RECT label = card; label.left += px(3); label.right -= px(3); label.top += px(10);
-            SetTextColor(draw->hDC, selected ? colors().selected_text
-                : name.empty() ? colors().quiet : colors().text);
-            DrawTextW(draw->hDC, name.c_str(), -1, &label,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            return TRUE;
-        }
         if (draw->CtlType == ODT_BUTTON) { paint_text_button(*draw); return TRUE; }
         if (draw->CtlType != ODT_LISTBOX) return FALSE;
         if (draw->itemID >= g_state->captures.size()) return TRUE;
@@ -4123,8 +4109,16 @@ void adjust_console_height() {
             (std::min)(count, static_cast<LRESULT>(8))));
     RECT client{}; GetClientRect(hwnd, &client);
     const double scale = GetDpiForWindow(hwnd) / 96.0;
-    RECT desired{0, 0, client.right, static_cast<LONG>((56 + (shortcut_list_mode() ? kShortcutHeight : rows * kResultHeight) + kLayerStyleRowHeight + (g_state->settings.show_slot_row ? kSlotRowHeight : 0) + 22 +
-        g_state->settings_extent)*scale)};
+    // Height budget: toolbar, list (or shortcut strip), style row, favourites strip,
+    // status line, then whatever the settings page adds. While the settings page is
+    // open the list and both strips are hidden, so none of them may reserve space.
+    const int list_part = g_state->settings_visible ? 0
+        : shortcut_list_mode() ? kShortcutHeight : rows * kResultHeight;
+    const int style_part = g_state->settings_visible ? 0 : kLayerStyleRowHeight;
+    const int favourites_part = (!g_state->settings_visible && g_state->settings.show_slot_row)
+        ? kSlotRowHeight : 0;
+    RECT desired{0, 0, client.right, static_cast<LONG>((56 + list_part + style_part +
+        favourites_part + 22 + g_state->settings_extent)*scale)};
     AdjustWindowRectEx(&desired, style, FALSE, GetWindowLongW(hwnd, GWL_EXSTYLE));
     const int height = desired.bottom - desired.top;
     RECT current{}; GetWindowRect(hwnd, &current);
@@ -4243,7 +4237,7 @@ void layout_controls(HWND hwnd) {
         for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
             const int left = margin + static_cast<int>(index) * inner / 9;
             const int right = margin + static_cast<int>(index + 1) * inner / 9;
-            move(g_state->slot_row_buttons[index], left, slot_row_top + 2, right - left - 3, kShortcutHeight);
+            move(g_state->slot_row_buttons[index], left, slot_row_top + 2, right - left, kShortcutHeight);
             ShowWindow(g_state->slot_row_buttons[index], SW_SHOWNA);
             apply_button_region(g_state->slot_row_buttons[index]);
         }
@@ -4270,72 +4264,77 @@ void layout_controls(HWND hwnd) {
         if (should_show != is_visible || !g_state->settings_animation_active)
             ShowWindow(child, should_show ? SW_SHOWNA : SW_HIDE);
     };
-    // Settings page layout. It reuses the panel's own rhythm: a 12px gutter, a single
-    // 28px row height, and one fixed label column so nothing floats out of alignment.
-    // Every row is fully occupied, which is what removes the empty holes.
+    // Settings page. One label column, one control column, and every row filled
+    // edge to edge - the gaps in the previous version were what read as "empty".
     const int row_h = 28;
     const int row_gap = 8;
     const int pad = 12;
-    const int gutter = inner - pad * 2;
-    const int label_w = narrow ? 92 : 112;
-    const int key_w = narrow ? 96 : 104;
-    const int field_x = pad + label_w;
-    const int field_w = (std::max)(80, gutter - label_w - key_w - 8);
+    const int gutter = inner - pad * 2;          // usable width
+    const int label_w = narrow ? 96 : 112;        // caption column
+    const int control_x = pad + label_w + 8;      // control column starts here
+    const int control_w = gutter - label_w - 8;   // and spans to the right edge
+    const int gap = 8;
     int cursor = 10;
     const auto next_row = [&](int height) {
         const int top = cursor;
         cursor += height + row_gap;
         return top;
     };
-    const auto caption_style = SS_CENTERIMAGE | SS_LEFT;
 
-    // Row 1: library actions.
+    // 1) Library: caption + two buttons + the live count filling the rest of the row.
     int y = next_row(row_h);
-    setting(g_state->refresh, pad, y, 84, row_h);
-    setting(g_state->dictionary, pad + 90, y, 84, row_h);
-    setting(g_state->count, pad + 180, y + 4, (std::max)(0, gutter - 180), 20);
+    setting(g_state->library_caption, pad, y, label_w, row_h);
+    setting(g_state->refresh, control_x, y, 84, row_h);
+    setting(g_state->dictionary, control_x + 92, y, 84, row_h);
+    setting(g_state->count, control_x + 184, y + 4,
+            (std::max)(0, gutter - (control_x - pad) - 184), 20);
 
-    // Row 2: shortcut editor. Field widths sum exactly to the gutter.
+    // 2) Global summon shortcut: label, editable field that stretches, save button.
     y = next_row(row_h);
-    setting(g_state->hotkey_label, pad, y, 58, row_h);
-    setting(g_state->hotkey_edit, pad + 62, y, 124, row_h);
-    setting(g_state->hotkey_save, pad + 192, y, 56, row_h);
-    setting(g_state->import_settings, pad + 254, y, 60, row_h);
-    setting(g_state->export_settings, pad + 320, y, 60, row_h);
+    setting(g_state->hotkey_label, pad, y, label_w, row_h);
+    setting(g_state->hotkey_edit, control_x, y, (std::max)(80, control_w - 60), row_h);
+    setting(g_state->hotkey_save, control_x + control_w - 52, y, 52, row_h);
 
-    // Row 3: input method + theme, the two global appearance choices.
-    y = next_row(row_h);
-    setting(g_state->ime_mode_combo, pad, y, narrow ? gutter : gutter - 140, row_h, 24);
-    setting(g_state->light_theme, pad + gutter - 132, y, 132, row_h, 24);
-
-    // Rows 4-5: the two shortcut groups. Identical geometry, so they read as a pair.
+    // 3-4) Appearance: two full-width dropdowns, one per row.
     y = next_row(row_h);
     setting(g_state->slot_row_caption, pad, y, label_w, row_h);
-    setting(g_state->slot_row_key, field_x, y, key_w, row_h, 24);
-    if (!narrow) setting(g_state->slot_row_hint, field_x + key_w + 8, y, field_w, row_h);
+    setting(g_state->slot_row_key, control_x, y, control_w, row_h, 24);
 
     y = next_row(row_h);
     setting(g_state->result_digit_caption, pad, y, label_w, row_h);
-    setting(g_state->result_digit_key, field_x, y, key_w, row_h, 24);
-    if (!narrow) setting(g_state->result_digit_hint, field_x + key_w + 8, y, field_w, row_h);
+    setting(g_state->result_digit_key, control_x, y, control_w, row_h, 24);
 
-    // Row 6: diagnostics export, right-aligned with the field column.
     y = next_row(row_h);
-    setting(g_state->export_log_button, pad + gutter - 92, y, 92, row_h);
+    setting(g_state->ime_caption, pad, y, label_w, row_h);
+    setting(g_state->ime_mode_combo, control_x, y, control_w, row_h, 24);
 
-    const int diagnostic_y = y;
-    const int export_width = 88;
-    const int update_y = diagnostic_y + row_h + row_gap;
-    // The update button lives in the settings grid when the page is open, and in the
-    // footer only when an update is waiting and the page is closed.
-    const bool update_in_settings = g_state->settings_extent >= update_y + row_h;
-    const bool update_in_footer = g_state->update_available && !update_in_settings;
-    if (update_in_settings) {
-        setting(g_state->update_button, pad, update_y,
-                narrow ? (inner - pad * 2) : (std::min)(180, inner - pad * 2), row_h);
-    } else {
+    y = next_row(row_h);
+    setting(g_state->theme_caption, pad, y, label_w, row_h);
+    setting(g_state->light_theme, control_x, y, control_w, row_h, 24);
+
+    // 5) Actions: four equal buttons spanning the full width.
+    const int action_w = (std::max)(60, (gutter - gap * 3) / 4);
+    y = next_row(row_h);
+    setting(g_state->import_settings, pad, y, action_w, row_h);
+    setting(g_state->export_settings, pad + action_w + gap, y, action_w, row_h);
+    setting(g_state->export_log_button, pad + (action_w + gap) * 2, y, action_w, row_h);
+    // The update button belongs to this row only while the settings page is open. On the
+    // home screen it lives in the footer and only when an update is waiting; otherwise it
+    // must be hidden, or it stays painted where the settings row used to be.
+    const bool update_in_footer = g_state->update_available;
+    if (g_state->settings_visible) {
+        setting(g_state->update_button, pad + (action_w + gap) * 3, y,
+                (std::max)(60, gutter - (action_w + gap) * 3), row_h);
+        if (IsWindow(g_state->update_button)) {
+            SetWindowTextW(g_state->update_button,
+                g_state->update_available ? L"立即更新" : L"检查更新");
+            EnableWindow(g_state->update_button, TRUE);
+        }
+    } else if (update_in_footer) {
         move(g_state->update_button, inner - 132, height - 22, 124, 20);
-        ShowWindow(g_state->update_button, update_in_footer ? SW_SHOWNA : SW_HIDE);
+        ShowWindow(g_state->update_button, SW_SHOWNA);
+    } else if (IsWindow(g_state->update_button)) {
+        ShowWindow(g_state->update_button, SW_HIDE);
     }
     const int update_width = update_in_footer ? 132 : 0;
     const int version_width = ui_px(46);
@@ -4580,7 +4579,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         break;
     }
     case WM_APP + 3:
-        if (!IsWindowVisible(hwnd) && !g_state->gallery_window && !g_state->modal_depth) {
+        // Never tear the palette down while an apply is in flight: the runner hides it on
+        // purpose for the host call, so "hidden" does not mean "the user closed it".
+        if (!g_state->applying_item && !IsWindowVisible(hwnd) &&
+            !g_state->gallery_window && !g_state->modal_depth) {
             save_and_restore(); DestroyWindow(hwnd);
         }
         return 0;
@@ -4775,8 +4777,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kResultDigitHintId);
         create_control(hwnd, &g_state->slot_row_caption, L"STATIC", L"第二行快捷栏",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kSlotRowCaptionId);
-        create_control(hwnd, &g_state->result_digit_caption, L"STATIC", L"默认数字键",
+        create_control(hwnd, &g_state->result_digit_caption, L"STATIC", L"数字键应用",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kResultDigitCaptionId);
+        create_control(hwnd, &g_state->library_caption, L"STATIC", L"效果库",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kLibraryCaptionId);
+        create_control(hwnd, &g_state->ime_caption, L"STATIC", L"输入法",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kImeCaptionId);
+        create_control(hwnd, &g_state->theme_caption, L"STATIC", L"界面主题",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kThemeCaptionId);
         create_control(hwnd, &g_state->slot_row_hint, L"STATIC",
                        L"快捷键与第三行无关",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kSlotRowHintId);
@@ -4880,7 +4888,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?300:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?330:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -5103,6 +5111,55 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             DeleteObject(divider);
             return TRUE;
         }
+        if (draw->CtlType == ODT_BUTTON &&
+            draw->CtlID >= kSlotRowFirstId && draw->CtlID < kSlotRowFirstId + 9) {
+            // Same construction as the first strip (the results list in shortcut mode):
+            // identical inset, radius, number font and position, label inset and
+            // ellipsis. Only the number caption differs - it carries the bound shortcut.
+            const size_t index = static_cast<size_t>(draw->CtlID - kSlotRowFirstId);
+            // Same label rules as the first strip: an unbound cell reads 空, never blank.
+            std::wstring name = L"空";
+            const auto& key = g_state->settings.row_slots[index];
+            if (!key.empty()) {
+                name = L"项目已失效";
+                for (const auto& item : g_state->catalog) {
+                    if (item_key(item) == key) { name = item_display_label(item); break; }
+                }
+            }
+            const int width = draw->rcItem.right - draw->rcItem.left;
+            const int height = draw->rcItem.bottom - draw->rcItem.top;
+            if (width <= 0 || height <= 0) return TRUE;
+            const auto hovered_entry = g_state->button_hovers.find(g_state->slot_row_buttons[index]);
+            const bool hovered = hovered_entry != g_state->button_hovers.end() &&
+                hovered_entry->second.hovered;
+            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            // The first strip is a list item, so it already fills its cell with the input
+            // colour before drawing the card. Do the same here or the 2px padding keeps
+            // stale pixels and the rows read differently.
+            SetDCBrushColor(draw->hDC, colors().input);
+            FillRect(draw->hDC, &draw->rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            RECT card = draw->rcItem; InflateRect(&card, -2, -2);
+            xfx::paint_round_rect(draw->hDC, card,
+                selected ? colors().selected : hovered ? colors().button : colors().surface,
+                static_cast<float>(ui_px(3)),
+                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+            const auto px = [hwnd](int value) { return MulDiv(value, GetDpiForWindow(hwnd), 96); };
+            RECT number = card; number.left += px(3); number.right -= px(3);
+            number.top += px(1); number.bottom = number.top + px(10);
+            const auto previous_font = SelectObject(draw->hDC,
+                g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+            SetBkMode(draw->hDC, TRANSPARENT);
+            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
+            DrawTextW(draw->hDC, slot_number_text(static_cast<int>(index),
+                g_state->settings.slot_row_modifier).c_str(), -1, &number, DT_LEFT | DT_SINGLELINE);
+            SelectObject(draw->hDC, previous_font);
+            RECT label = card; label.left += px(3); label.right -= px(3); label.top += px(10);
+            SetTextColor(draw->hDC, selected ? colors().selected_text
+                : name.empty() ? colors().quiet : colors().text);
+            DrawTextW(draw->hDC, name.c_str(), -1, &label,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            return TRUE;
+        }
         if (draw->CtlType == ODT_BUTTON) {
             const auto paint_button = [](const DRAWITEMSTRUCT& item) {
                 const bool icon = item.CtlID == kCaptureId ||
@@ -5264,7 +5321,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 300 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 330 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
@@ -5404,6 +5461,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
     case WM_CLOSE:
+        // An apply hides the palette and pumps messages. A close requested in that window
+        // must not destroy it underneath the running host call; the runner decides what
+        // happens next, and the close is re-requested afterwards if it was a real one.
+        if (g_state && g_state->applying_item) return 0;
         save_and_restore();
         DestroyWindow(hwnd);
         return 0;

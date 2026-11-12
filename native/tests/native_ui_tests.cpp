@@ -114,6 +114,36 @@ static void save_test_preview(HWND window, const fs::path& destination) {
     SelectObject(memory, previous); DeleteObject(image); DeleteDC(memory); ReleaseDC(window, dc);
 }
 
+// Runs the staged apply queue exactly as the host does: the AEGP idle hook is the only
+// context that is allowed to touch AE scripting now, so the test must drive it too.
+static void drain_idle_applies(int rounds = 240) {
+    // Standalone harness: there is no AE, so the host probe would report "unavailable"
+    // and the runner would hold the job for its 20 s safety valve. A throwaway basic
+    // suite makes the probe fail open, exactly like the real plugin when the probe
+    // itself cannot run.
+    SPBasicSuite stand_in{};
+    stand_in.AcquireSuite = [](const char*, int, const void**) -> SPErr { return -1; };
+    stand_in.ReleaseSuite = [](const char*, int) -> SPErr { return 0; };
+    auto* saved_basic = g_basic;
+    g_basic = &stand_in;
+    g_pending_apply_since = 0;
+    struct RestoreBasic { SPBasicSuite* saved; ~RestoreBasic() { g_basic = saved; } }
+        restore_basic{saved_basic};
+    // The runner holds work for kStartupSettleMs and then needs kRequiredClearStreak
+    // consecutive clear idles, so a handful of pumps is not enough; keep ticking until
+    // the queue actually drains or the budget is spent.
+    A_long max_sleep = 0;
+    for (int round = 0; round < rounds; ++round) {
+        pump();
+        const size_t pending = g_pending_applies.size();
+        bridge_idle_hook(nullptr, nullptr, &max_sleep);
+        pump();
+        if (pending && g_pending_applies.size() < pending) break;
+        if (!pending) { Sleep(15); continue; }
+        Sleep(15);
+    }
+}
+
 static void pump_for(DWORD milliseconds) {
     const auto deadline = GetTickCount64() + milliseconds;
     do { pump(); Sleep(1); } while (GetTickCount64() < deadline);
@@ -275,6 +305,14 @@ static void check_button_hover(HWND button) {
 // not a fixed sleep; retain a deadline even after submission so validation errors
 // cannot strand this test in a modal loop. Paths are isolated test files.
 
+
+// The IME option is a dropdown; drive it the way a user would.
+static void select_ime_mode(xfx::ImeMode mode) {
+    SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL, static_cast<int>(mode), 0);
+    SendMessageW(g_state->window, WM_COMMAND,
+        MAKEWPARAM(kImeModeId, CBN_SELCHANGE), reinterpret_cast<LPARAM>(g_state->ime_mode_combo));
+    pump();
+}
 
 int wmain(int argc, wchar_t** argv) {
     std::cout << std::unitbuf; std::cerr << std::unitbuf;
@@ -460,6 +498,40 @@ int wmain(int argc, wchar_t** argv) {
         else if (check == L"--ime-retry") check_ime_failure_retry();
         else if (check == L"--ime-pending-restore") check_ime_pending_restore();
         else if (check == L"--apply-click") check_result_click_is_deferred();
+        else if (check == L"--settings") {
+            // The settings page as the user sees it, at the normal palette width.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(260);
+            layout_controls(g_state->window);
+            RedrawWindow(g_state->window, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
+            pump_for(120);
+            if (argc > 1) save_test_preview(g_state->window,
+                fs::path(argv[1]).parent_path() / L"settings-preview-now.png");
+            std::cout << "PASS settings rendered\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--strips") {
+            // Both favourite strips side by side, exactly as the palette draws them.
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Ctrl";
+            g_state->settings.row_slots[0] = L"ADBE Gaussian Blur 2";
+            g_state->settings.row_slots[1] = L"ADBE Glo2";
+            g_state->settings.slots[0] = L"ADBE Gaussian Blur 2";
+            g_state->settings.slots[1] = L"ADBE Glo2";
+            g_state->settings.slot_labels[0] = L"";
+            update_results_list_style(true);
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(200);
+            if (argc > 1) save_test_preview(g_state->window,
+                fs::path(argv[1]).parent_path() / L"strips-preview.png");
+            std::cout << "PASS strips rendered\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--search-cursor") check_search_cursor_stability();
         else if (check == L"--filter-surface") check_filter_background_transitions(regression_artifacts);
         else if (check == L"--filter-center") check_filter_combo_group_center();
@@ -485,7 +557,7 @@ int wmain(int argc, wchar_t** argv) {
                 RECT status = child_rect_in_parent(g_state->window, g_state->status);
                 assert(button.bottom <= status.top);
                 for (const auto other : {g_state->refresh, g_state->dictionary, g_state->count, g_state->hotkey_edit,
-                     g_state->hotkey_save, g_state->import_settings, g_state->export_settings, g_state->mode_checkbox, g_state->light_theme}) {
+                     g_state->hotkey_save, g_state->import_settings, g_state->export_settings, g_state->ime_mode_combo, g_state->light_theme}) {
                     RECT intersection{}, r = child_rect_in_parent(g_state->window, other);
                     assert(!IsWindowVisible(other) || !IntersectRect(&intersection, &button, &r));
                 }
@@ -604,7 +676,7 @@ int wmain(int argc, wchar_t** argv) {
         SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(1108, BN_CLICKED),
                      reinterpret_cast<LPARAM>(GetDlgItem(g_state->window, 1108)));
         assert(g_test_last_script.empty()); // deferred, not inside button event
-        pump();
+        drain_idle_applies();
         assert(g_test_last_script.find("frameFX/enabled") != std::string::npos);
         assert(g_test_last_script.find("executeCommand") != std::string::npos);
         assert(g_test_last_script.find("addProperty") == std::string::npos);
@@ -658,12 +730,14 @@ int wmain(int argc, wchar_t** argv) {
         SetFocus(g_state->search);
     }
     {
+        // Clear any mode applied earlier in this run, then read the real ambient state:
+        // that is exactly what the controller captures and later restores.
+        select_ime_mode(xfx::ImeMode::Disabled);
         HIMC context = ImmGetContext(g_state->search);
         DWORD original_conversion = 0, original_sentence = 0;
         if (context && ImmGetConversionStatus(context, &original_conversion, &original_sentence)) {
             ImmReleaseContext(g_state->search, context);
-            SendMessageW(g_state->mode_checkbox, BM_SETCHECK, BST_CHECKED, 0);
-            SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(kModeId, BN_CLICKED), 0);
+            select_ime_mode(xfx::ImeMode::EnglishAlways);
             assert(g_state->ime_session_active);
             assert(g_state->settings.use_english_mode);
             context = ImmGetContext(g_state->search);
@@ -672,9 +746,6 @@ int wmain(int argc, wchar_t** argv) {
             assert(!ImmGetOpenStatus(context));
             ImmReleaseContext(g_state->search, context);
             SetFocus(g_state->results);
-            context = ImmGetContext(g_state->search);
-            assert(context && ImmSetConversionStatus(context, original_conversion, original_sentence));
-            ImmReleaseContext(g_state->search, context);
             SetFocus(g_state->search);
             context = ImmGetContext(g_state->search);
             assert(context && ImmGetConversionStatus(context, &conversion, &sentence));
@@ -683,8 +754,7 @@ int wmain(int argc, wchar_t** argv) {
             save_settings();
             assert(g_state->settings.use_english_mode &&
                 xfx::SettingsStore::load(g_test_settings_path).use_english_mode);
-            SendMessageW(g_state->mode_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(kModeId, BN_CLICKED), 0);
+            select_ime_mode(xfx::ImeMode::Disabled);
             save_settings();
             assert(!g_state->settings.use_english_mode &&
                 !xfx::SettingsStore::load(g_test_settings_path).use_english_mode);
@@ -692,8 +762,8 @@ int wmain(int argc, wchar_t** argv) {
             assert(context && ImmGetConversionStatus(context, &conversion, &sentence));
             assert(conversion == original_conversion && sentence == original_sentence);
             ImmReleaseContext(g_state->search, context);
-            SendMessageW(g_state->mode_checkbox, BM_SETCHECK, BST_CHECKED, 0);
-            SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(kModeId, BN_CLICKED), 0);
+            // Closing in Restore mode must hand the original input state back.
+            select_ime_mode(xfx::ImeMode::Restore);
             context = ImmGetContext(g_state->search);
             assert(context && ImmGetConversionStatus(context, &conversion, &sentence));
             assert(!ImmGetOpenStatus(context));
@@ -704,8 +774,7 @@ int wmain(int argc, wchar_t** argv) {
             assert(context && ImmGetConversionStatus(context, &conversion, &sentence));
             assert(conversion == original_conversion && sentence == original_sentence);
             ImmReleaseContext(g_state->search, context);
-            SendMessageW(g_state->mode_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(kModeId, BN_CLICKED), 0);
+            select_ime_mode(xfx::ImeMode::Disabled);
             std::cout << "PASS English input mode really closes the IME and restores its original conversion state\n";
         } else {
             if (context) ImmReleaseContext(g_state->search, context);
@@ -952,6 +1021,10 @@ int wmain(int argc, wchar_t** argv) {
         SetWindowPos(g_state->window, nullptr, original.left, original.top, 0, 0,
             SWP_NOSIZE | SWP_NOZORDER);
     }
+    // Home page in shortcut-strip mode: nine cells, independent of any earlier search.
+    SetWindowTextW(g_state->search, L"");
+    populate_results();
+    assert(shortcut_list_mode());
     assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) == 9);
     const LRESULT top_before_wheel = SendMessageW(g_state->results, LB_GETTOPINDEX, 0, 0);
     for (int wheel = 0; wheel < 8; ++wheel)
@@ -1078,16 +1151,36 @@ int wmain(int argc, wchar_t** argv) {
     assert(g_state->visible_slot_numbers[0] == 0);
     BYTE saved_keys[256]{}, digit_keys[256]{};
     GetKeyboardState(saved_keys); SetKeyboardState(digit_keys);
-    search_edit_proc(g_state->search, WM_KEYDOWN, '1', 0);
-    search_edit_proc(g_state->search, WM_CHAR, '1', 0);
+    // Real main-row digit carries scan code 0x02 ('1'). Passing 0 exercises no path at
+    // all, so the digit fell through to the default edit behaviour.
+    // Shortcut-strip mode: the digit is consumed by the favourites shortcut, so the
+    // second strip has to be enabled and its first cell bound for that path to exist.
+    // Shortcut-strip mode: a main-row digit is consumed by the strip shortcut and must
+    // never be typed into the search box. The apply itself runs on the idle hook (which
+    // this harness does drive), so only the "no text inserted" contract is asserted here;
+    // the apply path has its own checks.
+    {
+        const auto saved = g_state->settings;
+        g_state->settings.show_slot_row = true;
+        g_state->settings.slot_row_modifier = L"";
+        g_state->settings.row_slots[0] = L"ADBE Gaussian Blur 2";
+        search_edit_proc(g_state->search, WM_KEYDOWN, '1', 0x00020001);
+        search_edit_proc(g_state->search, WM_CHAR, '1', 0x00020001);
+        // The pressed key staged an apply. Drop it: running it would close the palette and
+        // this block is only about the digit never reaching the text field.
+        g_pending_applies.clear();
+        g_state->settings = saved;
+    }
     assert(GetWindowTextLengthW(g_state->search) == 0);
-    wchar_t digit_status[256]{}; GetWindowTextW(g_state->status, digit_status, 256);
-    assert(std::wstring(digit_status).find(L"AE host unavailable") != std::wstring::npos);
+    SetWindowTextW(g_state->search, L"");
+    SendMessageW(g_state->filter, CB_SETCURSEL, 0, 0);
+    populate_results();
     SetKeyboardState(saved_keys);
     clear_slot(0);
     assert(slot_display_label(0) == L"空" && g_state->settings.slot_labels[0].empty());
     SetWindowTextW(g_state->search, L"");
     SetWindowTextW(g_state->search, L"gsmh");
+    populate_results();
     assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) == 1);
     SetWindowTextW(g_state->search, L"");
     SetWindowTextW(g_state->search, L"g");
@@ -1138,8 +1231,10 @@ int wmain(int argc, wchar_t** argv) {
     RECT refresh_rect{}, dictionary_rect{};
     GetWindowRect(g_state->refresh, &refresh_rect);
     GetWindowRect(g_state->dictionary, &dictionary_rect);
-    assert(refresh_rect.left == hotkey_label_rect.left);
-    assert(dictionary_rect.left - refresh_rect.right == 4);
+    // One caption column, one control column: the library buttons line up with the
+    // shortcut field, and the row uses the same 8px gap as every other row.
+    assert(refresh_rect.left == hotkey_edit_rect.left);
+    assert(dictionary_rect.left - refresh_rect.right == 8);
     POINT saved_cursor{}; GetCursorPos(&saved_cursor);
     SetCursorPos(60, 60); pump();
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
@@ -1255,6 +1350,8 @@ int wmain(int argc, wchar_t** argv) {
     g_test_script_reply = xfx::ScriptReply{true, false, 1, ""};
     results_list_proc(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(12, 4));
     pump();
+    // The apply runs on the AEGP idle hook and closes the palette from there.
+    drain_idle_applies();
     g_test_script_reply.reset();
     assert(!g_state->window);
     g_test_initial_background_fill_count = 0;

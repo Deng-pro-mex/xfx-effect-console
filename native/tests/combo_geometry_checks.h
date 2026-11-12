@@ -183,16 +183,16 @@ static void check_combo_target_sizes() {
     const auto capture = child_rect_in_parent(g_state->window, g_state->capture);
     assert(filter.top == capture.top && filter.bottom == capture.bottom);
     const auto theme = child_rect_in_parent(g_state->window, g_state->light_theme);
-    const auto checkbox = child_rect_in_parent(g_state->window, g_state->mode_checkbox);
     if (theme.bottom - theme.top != MulDiv(28, dpi, 96))
         std::wcerr << L"Theme ComboBox actual height=" << theme.bottom - theme.top <<
             L" target=" << MulDiv(28, dpi, 96) << L" dpi=" << dpi << L"\n";
     assert(theme.bottom - theme.top == MulDiv(28, dpi, 96));
     RECT client{}; GetClientRect(g_state->window, &client);
     const bool narrow = MulDiv(client.right, 96, dpi) < 440;
-    // In a wide settings row the checkbox and theme selector share a center.
-    if (!narrow)
-        assert(std::abs(theme.top + theme.bottom - checkbox.top - checkbox.bottom) <= 1);
+    // Every settings row uses the same 28px control height, so the two appearance
+    // dropdowns must come out the same size.
+    const auto ime = child_rect_in_parent(g_state->window, g_state->ime_mode_combo);
+    assert(ime.bottom - ime.top == theme.bottom - theme.top);
 }
 
 static void check_combo_geometry(const fs::path& artifact_directory = {}) {

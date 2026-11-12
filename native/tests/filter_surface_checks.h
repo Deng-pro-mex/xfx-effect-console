@@ -59,7 +59,10 @@ static void check_filter_background_transitions(const fs::path& artifacts={}) {
         bool good=true;
         for(auto point:samples){
             const auto actual=GetPixel(dc,point.x,point.y);
-            if(actual!=colors().background){
+            // The outermost pixel row is the panel outline; both it and the background
+            // are correct. A leftover (unrepainted) gap is neither.
+            const bool repainted=actual==colors().background||actual==colors().divider;
+            if(!repainted){
                 std::cerr<<"Filter parent pixel not covered selection="<<selection<<" point="<<point.x<<","<<point.y
                     <<" rgb="<<actual<<" expected="<<colors().background<<"\n";good=false;
             }
