@@ -567,6 +567,135 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--long-session") {
+            // One continuous sequence through every panel state. Each transition can leave
+            // stale list style, stale focus or a stale drag flag, and none of those show up
+            // in a test that exercises a single state in isolation.
+            show_console();
+            pump_for(160);
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+
+            // 1. Shortcut strip (empty query) -> own list style, nine rows.
+            SetWindowTextW(g_state->search, L"");
+            populate_results();
+            pump_for(120);
+            assert((GetWindowLongW(g_state->results, GWL_STYLE) & LBS_MULTICOLUMN) != 0);
+
+            // 2. Typing leaves the shortcut strip and shows search results.
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(140);
+            assert((GetWindowLongW(g_state->results, GWL_STYLE) & LBS_MULTICOLUMN) == 0);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            // 3. A filter switch keeps the non-shortcut list and does not crash on an
+            //    empty result (预设 with 0 rows).
+            for (int filter = 0; filter < 5; ++filter) {
+                SendMessageW(g_state->filter, CB_SETCURSEL, filter, 0);
+                SendMessageW(g_state->window, WM_COMMAND,
+                    MAKEWPARAM(kFilterId, CBN_SELCHANGE),
+                    reinterpret_cast<LPARAM>(g_state->filter));
+                pump_for(90);
+                assert(IsWindow(g_state->results));
+                assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) >= 0);
+            }
+            SendMessageW(g_state->filter, CB_SETCURSEL, 0, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kFilterId, CBN_SELCHANGE), reinterpret_cast<LPARAM>(g_state->filter));
+
+            // 4. Settings opens and closes; the palette must return to the same list mode.
+            const bool before_shortcut = (GetWindowLongW(g_state->results, GWL_STYLE) & LBS_MULTICOLUMN) != 0;
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(280);
+            assert(g_state->settings_visible);
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(300);
+            assert(!g_state->settings_visible);
+            assert(((GetWindowLongW(g_state->results, GWL_STYLE) & LBS_MULTICOLUMN) != 0) == before_shortcut);
+
+            // 5. A stale drag state from an aborted gesture must not survive into a bind.
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(120);
+            RECT row{};
+            SendMessageW(g_state->results, LB_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&row));
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            SendMessageW(g_state->results, WM_CANCELMODE, 0, 0);   // aborted
+            pump_for(80);
+            assert(!g_state->result_drag_armed);
+            for (const auto& slot : g_state->settings.row_slots) assert(slot.empty());
+
+            // 6. And a real drag right after the abort still binds.
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[6], &cell));
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            SetCursorPos((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2);
+            SendMessageW(g_state->results, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(2, 2));
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(2, 2));
+            pump_for(120);
+            assert(!g_state->settings.row_slots[6].empty());
+
+            // 7. Closing and reopening keeps the bind and the strip switch. The switch is
+            //    persisted by the settings page, so that is the path that must save it.
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(300);
+            {
+                const HWND slot_combo = GetDlgItem(g_state->window, kSlotRowKeyId);
+                assert(slot_combo && IsWindowVisible(slot_combo));
+                SendMessageW(slot_combo, CB_SETCURSEL, 3, 0);
+                SendMessageW(g_state->window, WM_COMMAND,
+                    MAKEWPARAM(kSlotRowKeyId, CBN_SELCHANGE),
+                    reinterpret_cast<LPARAM>(slot_combo));
+                pump_for(220);
+            }
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(320);
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(80);
+            show_console();
+            pump_for(200);
+            const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+            assert(reloaded.show_slot_row);
+            assert(reloaded.row_slots[6] == g_state->settings.row_slots[6]);
+            std::cout << "PASS a full session through every panel state keeps its invariants\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--reopen-no-leak") {
+            // Open and close the palette many times. Every handle the window owns must be
+            // released, or a long AE session leaks GDI objects until the process dies.
+            show_console();
+            pump_for(160);
+            const DWORD gdi_before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+            const DWORD user_before = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+            for (int cycle = 0; cycle < 12; ++cycle) {
+                SetWindowTextW(g_state->search, L"gao");
+                populate_results();
+                pump_for(30);
+                SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+                pump_for(40);
+                assert(!IsWindow(g_state->window));
+                show_console();
+                pump_for(50);
+                assert(IsWindow(g_state->window));
+            }
+            pump_for(120);
+            const DWORD gdi_after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+            const DWORD user_after = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+            std::cout << "  gdi " << gdi_before << " -> " << gdi_after
+                      << "  user " << user_before << " -> " << user_after << "\n";
+            // A handful of caches may settle upward; a leak of every reopen would be ~12x
+            // the per-window handle count and is caught by this bound.
+            assert(gdi_after <= gdi_before + 20);
+            assert(user_after <= user_before + 20);
+            std::cout << "PASS closing and reopening the palette does not leak handles\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--panel-contract") {
             // The ScriptUI panel parses the native replies. Any change to their shape
             // silently breaks the panel instead of the plugin, which is exactly the kind of
