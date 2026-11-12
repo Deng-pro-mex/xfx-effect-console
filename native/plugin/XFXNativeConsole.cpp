@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.25";
+constexpr char kProductVersion[] = "1.5.26";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1451,7 +1451,14 @@ UINT modifier_from_text(const std::wstring& text) {
     return modifiers;
 }
 
+#ifdef XFX_CONSOLE_TEST
+std::optional<UINT> g_test_keyboard_modifiers;
+#endif
+
 UINT current_modifiers() {
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_keyboard_modifiers) return *g_test_keyboard_modifiers;
+#endif
     UINT modifiers = 0;
     if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
     if (GetKeyState(VK_MENU) & 0x8000) modifiers |= MOD_ALT;
@@ -1671,7 +1678,7 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             return CallWindowProcW(g_search_proc, hwnd, message, wparam, lparam);
         }
     }
-    if (message == WM_KEYDOWN) {
+    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
         // Ctrl + main-row digit has to be handled HERE: an edit control produces no
         // WM_CHAR at all for Ctrl+digit (confirmed by apply-trace.log, which shows no
         // character message for that combination), so any character-stage handling is
@@ -1688,6 +1695,7 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
         if (try_result_digit_shortcut(wparam, lparam, true)) return 0;
+
         if (wparam == VK_RETURN) {
             execute_selected();
             return 0;
@@ -2084,7 +2092,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (message == WM_CANCELMODE && GetCapture() == hwnd) ReleaseCapture();
         return 0;
     }
-    if (message == WM_KEYDOWN) {
+    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
         if (try_digit_shortcut(wparam, lparam, false)) return 0;
         if (try_result_digit_shortcut(wparam, lparam, false)) return 0;
         const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;

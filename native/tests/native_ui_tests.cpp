@@ -754,6 +754,119 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--slot-row-alt-fires") {
+            // The DEFAULT second-strip binding is Alt+1..9, and Alt+digit arrives as
+            // WM_SYSKEYDOWN. If the key handler only listens to WM_KEYDOWN, the shortcut
+            // simply never fires - which reads as "the second strip does not work".
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(180);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            // Bind through the real bind path, using the key the catalog produces.
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            assign_row_slot(2);
+            pump();
+            assert(!g_state->settings.row_slots[2].empty());
+            // The bound key must resolve in the live catalog, or running the cell reports
+            // "项目已失效" instead of applying anything.
+            {
+                const auto key = g_state->settings.row_slots[2];
+                const bool resolvable = std::any_of(g_state->catalog.begin(),
+                    g_state->catalog.end(),
+                    [&](const xfx::CatalogItem& item) { return item_key(item) == key; });
+                assert(resolvable);
+            }
+            const LPARAM down = MAKELPARAM(1, 0x4E);
+            // With Alt held, Alt+3 must be consumed as the strip shortcut and must queue
+            // the bound effect for the host.
+            g_test_keyboard_modifiers = MOD_ALT;
+            assert(try_digit_shortcut('3', down, false));
+            assert(!g_pending_applies.empty());
+            g_pending_applies.clear();
+            // Without Alt the same key belongs to "apply the 3rd result", not the strip.
+            g_test_keyboard_modifiers = 0;
+            assert(!try_digit_shortcut('3', down, false));
+            // The window proc must route WM_SYSKEYDOWN into that handler at all.
+            g_test_keyboard_modifiers = MOD_ALT;
+            SetFocus(g_state->results);
+            SendMessageW(g_state->results, WM_SYSKEYDOWN, '3', down);
+            assert(!g_pending_applies.empty());
+            g_pending_applies.clear();
+            g_test_keyboard_modifiers.reset();
+            std::cout << "PASS Alt+digit reaches the second strip (WM_SYSKEYDOWN)\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--slot-row-all-ways") {
+            // Every documented way to bind a second-strip cell must work, and each must
+            // land the SAME key. A path that silently binds nothing is exactly what the
+            // user reported as "not supported".
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(180);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, 0, 0);
+            assert(data && data != LB_ERR);
+            const auto expected = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+
+            // 1. Shift+click an empty cell.
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowFirstId + 0, BN_CLICKED),
+                reinterpret_cast<LPARAM>(g_state->slot_row_buttons[0]));
+            pump();
+            assert(g_state->settings.row_slots[0] == expected);
+
+            // 2. Clicking an empty cell binds (no modifier key held).
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowFirstId + 1, BN_CLICKED),
+                reinterpret_cast<LPARAM>(g_state->slot_row_buttons[1]));
+            pump();
+            assert(g_state->settings.row_slots[1] == expected);
+
+            // 3. Right-click menu command path.
+            g_state->settings.row_slots[2].clear();
+            assert(selected_row_can_bind());
+            assign_row_slot(2);
+            pump();
+            assert(g_state->settings.row_slots[2] == expected);
+
+            // 4. Drag path.
+            g_state->settings.row_slots[3].clear();
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[3], &cell));
+            g_test_drag_cursor = POINT{cell.left + 5, cell.top + 5};
+            assign_row_slot_dragged(3, 0);
+            g_test_drag_cursor.reset();
+            pump();
+            assert(g_state->settings.row_slots[3] == expected);
+
+            // All four must persist to disk, not just live in memory.
+            const auto stored = xfx::SettingsStore::load(g_test_settings_path);
+            for (int slot = 0; slot < 4; ++slot)
+                assert(stored.row_slots[static_cast<size_t>(slot)] == expected);
+
+            // And every bound cell must show a real label, with the configured modifier.
+            for (int slot = 0; slot < 4; ++slot) {
+                const auto label = slot_row_display_label(slot);
+                assert(!label.empty() && label != L"空");
+                const auto number = slot_number_text(slot, g_state->settings.slot_row_modifier);
+                assert(number == L"Alt+" + std::to_wstring(slot + 1));
+            }
+            std::cout << "PASS all four bind paths agree, persist and label correctly\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--slot-row-click-bind") {
             // Select a result, then click an EMPTY second-strip cell. That is the natural
             // gesture for "bind this to the second row" and it used to report the slot as
@@ -982,6 +1095,33 @@ int wmain(int argc, wchar_t** argv) {
                 RECT region_box{};
                 const int region_type = GetWindowRgnBox(info.hwndList, &region_box);
                 assert(region_type != ERROR);
+                // Sample what the popup actually paints. A blank white list - the reported
+                // bug - shows up here as a mostly-white capture.
+                if (argc > 1 && height > 8) {
+                    RECT shot_rect{};
+                    GetWindowRect(info.hwndList, &shot_rect);
+                    const int sw = shot_rect.right - shot_rect.left;
+                    const int sh = shot_rect.bottom - shot_rect.top;
+                    HDC screen = GetDC(nullptr);
+                    HDC memory = CreateCompatibleDC(screen);
+                    HBITMAP shot = CreateCompatibleBitmap(screen, sw, sh);
+                    const auto previous = SelectObject(memory, shot);
+                    BitBlt(memory, 0, 0, sw, sh, screen, shot_rect.left, shot_rect.top, SRCCOPY);
+                    size_t white = 0, total = 0;
+                    for (int y = 0; y < sh; ++y)
+                        for (int x = 0; x < sw; ++x, ++total)
+                            if (GetPixel(memory, x, y) == RGB(255, 255, 255)) ++white;
+                    std::cout << "    whitePixels=" << (total ? white * 100 / total : 0) << "%\n";
+                    assert(white * 100 < total * 50);
+                    const auto destination = fs::path(argv[1]).parent_path() /
+                        (L"dropdown-live-" + std::to_wstring(id) + L".png");
+                    Gdiplus::Bitmap image(shot, nullptr);
+                    CLSID png{0x557cf406, 0x1a04, 0x11d3,
+                        {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+                    image.Save(destination.c_str(), &png, nullptr);
+                    SelectObject(memory, previous);
+                    DeleteObject(shot); DeleteDC(memory); ReleaseDC(nullptr, screen);
+                }
                 SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
                 pump_for(60);
                 ++checked;
