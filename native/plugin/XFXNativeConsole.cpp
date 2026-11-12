@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.16";
+constexpr char kProductVersion[] = "1.5.17";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1766,7 +1766,6 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             // state untouched for WM_LBUTTONUP to handle.
             KillTimer(hwnd, kResultDragTimerId);
             if (g_state->result_drag_target < 0) return 0;
-            update_result_drag_target();
             const int drop_target = g_state->result_drag_target;
             const int drag_row = g_state->result_drag_row;
             g_state->result_drag_armed = false;
@@ -2218,6 +2217,12 @@ void update_results_list_style(bool shortcut_mode) {
         const HWND old = g_state->results;
         const bool focused = GetFocus() == old;
         if (GetCapture() == old) ReleaseCapture();
+        // The poll timer is owned by this window, so it dies with it. Clear the drag state
+        // too, or the next window would think a drag from the old one is still running.
+        KillTimer(old, kResultDragTimerId);
+        g_state->result_drag_armed = false;
+        g_state->result_drag_row = -1;
+        g_state->result_drag_target = -1;
         g_state->result_click_pending = false;
         g_state->result_click_redraw_held = false;
         g_state->result_click_row = -1;
