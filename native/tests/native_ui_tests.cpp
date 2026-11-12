@@ -567,6 +567,106 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--modal-depth-balanced") {
+            // modal_depth gates auto-close, the drag poll and "is the palette busy". One
+            // leaked increment leaves the palette permanently modal: it stops closing on
+            // focus loss and stops accepting drops, with no visible reason.
+            show_console();
+            pump_for(160);
+            const unsigned int baseline = g_state->modal_depth;
+            assert(baseline == 0);
+
+            // Every operation that opens a nested scope must give the counter back.
+            for (int round = 0; round < 6; ++round) {
+                // A real menu would block waiting for input in this harness; feed the
+                // command the way every other menu test does.
+                g_test_popup_command = static_cast<std::optional<UINT>>(0);
+                show_slot_row_menu(0);                 // ModalGuard inside
+                pump_for(20);
+                assert(g_state->modal_depth == baseline);
+                g_test_popup_command = static_cast<std::optional<UINT>>(0);
+                show_shortcut_menu();
+                pump_for(20);
+                assert(g_state->modal_depth == baseline);
+                g_test_popup_command = static_cast<std::optional<UINT>>(0);
+                show_result_menu(g_state->results, MAKELPARAM(10, 10));
+                pump_for(20);
+                assert(g_state->modal_depth == baseline);
+            }
+
+            // And an apply that runs through the idle runner must not leave it raised.
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(120);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 12 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            g_test_script_reply.reset();
+            pump_for(100);
+            std::cout << "  modal_depth after all scopes = " << g_state->modal_depth << "\n";
+            assert(g_state->modal_depth == baseline);
+            std::cout << "PASS every modal scope restores the depth counter\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--ime-session-balance") {
+            // The IME is switched on open and restored on close. Every path that hides the
+            // palette must leave the session flag false, or the next open captures the
+            // ALREADY-SWITCHED state as "original" and the user's own IME setting is lost.
+            show_console();
+            pump_for(160);
+            assert(g_state->ime_session_active);          // opened -> session live
+
+            // 1. A plain close restores and clears.
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(80);
+            assert(!g_state->ime_session_active);
+            assert(!IsWindow(g_state->window));
+
+            // 2. Open, then run an apply (which hides the palette mid-flight).
+            show_console();
+            pump_for(160);
+            assert(g_state->ime_session_active);
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(120);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            assert(!g_pending_applies.empty());
+            for (int tick = 0; tick < 12 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            g_test_script_reply.reset();
+            pump_for(120);
+            // The success path closes the palette; either way the session must be settled.
+            assert(!g_state->ime_session_active);
+
+            // 3. Reopening starts a NEW session rather than reusing the old capture.
+            if (!IsWindow(g_state->window)) { show_console(); pump_for(200); }
+            assert(g_state->ime_session_active);
+
+            // 4. Closing from the settings page also settles it.
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(280);
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(90);
+            assert(!g_state->ime_session_active);
+            std::cout << "PASS the IME session is balanced across open, apply and close\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--shortcut-choice-roundtrip") {
             // The two shortcut dropdowns store "closed" and "no modifier" as DIFFERENT
             // selections that both map to an empty modifier string. Reopening the page must
