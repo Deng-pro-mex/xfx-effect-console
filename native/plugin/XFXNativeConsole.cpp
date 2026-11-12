@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.26";
+constexpr char kProductVersion[] = "1.5.27";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2483,6 +2483,8 @@ void refresh_catalog() {
 // Returns false when AE is genuinely idle, so normal scripting is unaffected.
 #ifdef XFX_CONSOLE_TEST
 std::optional<bool> g_test_force_modal;
+std::optional<bool> g_test_scripting_available = true;
+int g_test_message_box_count = 0;
 #endif
 
 bool ae_modal_pending() {
@@ -2562,6 +2564,13 @@ std::wstring trace_log_path() {
     catch (...) { return {}; }
 }
 
+int show_message_box(HWND owner, const wchar_t* text, const wchar_t* caption, UINT type) {
+#ifdef XFX_CONSOLE_TEST
+    ++g_test_message_box_count;
+#endif
+    return MessageBoxW(owner, text, caption, type);
+}
+
 void update_trace(const std::string& text, bool always) {
     // Always record. Diagnostics are not optional: a problem on someone else's machine
     // is only debuggable if the evidence was captured before anyone noticed.
@@ -2585,6 +2594,9 @@ void update_trace(const std::string& text, bool always) {
 }
 
 bool host_scripting_available() {
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_scripting_available) return *g_test_scripting_available;
+#endif
     if (!g_basic) return false;
     try {
         AEGP_SuiteHandler suites(g_basic);
@@ -3301,7 +3313,7 @@ void save_captures_as_batch(const std::vector<fs::path>& files) {
         target.replace_extension(format == 2 ? L".jpg" : L".png");
         std::error_code error;
         if (fs::equivalent(source, target, error) && !error) { ++skipped; continue; }
-        if (fs::exists(target) && MessageBoxW(g_state->gallery_window,
+        if (fs::exists(target) && show_message_box(g_state->gallery_window,
             (L"覆盖已存在的文件？\n" + target.wstring()).c_str(), L"确认替换图片",
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) { ++skipped; continue; }
         if (xfx::export_capture(source, target, format == 2)) ++saved;
@@ -3330,14 +3342,14 @@ void save_capture_as() {
     target.replace_extension(jpeg ? L".jpg" : L".png");
     std::error_code error;
     if (fs::equivalent(source, target, error) && !error) {
-        MessageBoxW(g_state->gallery_window, L"这张图片已经保存在该路径。", L"快照", MB_OK);
+        show_message_box(g_state->gallery_window, L"这张图片已经保存在该路径。", L"快照", MB_OK);
         return;
     }
     if (target != fs::path(filename) && fs::exists(target, error) &&
-        MessageBoxW(g_state->gallery_window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
+        show_message_box(g_state->gallery_window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
             L"确认替换图片", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
     const bool success = xfx::export_capture(source, target, jpeg);
-    MessageBoxW(g_state->gallery_window, success ? L"图片已保存。" : L"图片保存失败，请检查路径。",
+    show_message_box(g_state->gallery_window, success ? L"图片已保存。" : L"图片保存失败，请检查路径。",
         L"快照导出", MB_OK | (success ? MB_ICONINFORMATION : MB_ICONERROR));
 }
 
@@ -3354,7 +3366,7 @@ void delete_selected_captures() {
     ModalGuard modal;
     const auto question = L"永久删除所选的 " + std::to_wstring(files.size()) + L" 张快照？\n" +
         capture_directory().wstring() + L"\n此操作无法撤销。";
-    if (MessageBoxW(g_state->gallery_window, question.c_str(), L"删除快照",
+    if (show_message_box(g_state->gallery_window, question.c_str(), L"删除快照",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
     const auto results = xfx::delete_captures(capture_directory(), files);
     size_t deleted = 0;
@@ -6087,7 +6099,7 @@ void show_console(bool visible = true) {
     if (!g_state->window) {
         g_state->ime.restore();
         g_state->ime_session_active = false;
-        MessageBoxW(nullptr, L"无法创建插件窗口。", L"效果控制台", MB_OK | MB_ICONERROR);
+        show_message_box(nullptr, L"无法创建插件窗口。", L"效果控制台", MB_OK | MB_ICONERROR);
         return;
     }
     // The window is still hidden. Its DPI is now known for the destination
@@ -6167,7 +6179,7 @@ void queue_native_snapshot() {
         set_status(L"等待 AE 保存快照…");
     } else {
         ModalGuard modal;
-        MessageBoxW(g_state->window, L"AE 截图服务尚未就绪，请重新打开面板后重试。", L"快照保存失败", MB_OK | MB_ICONERROR);
+        show_message_box(g_state->window, L"AE 截图服务尚未就绪，请重新打开面板后重试。", L"快照保存失败", MB_OK | MB_ICONERROR);
     }
 }
 void complete_snapshot_request(const xfx::BridgeRequest& request, const xfx::BridgeCompletion& result) {
@@ -6177,7 +6189,7 @@ void complete_snapshot_request(const xfx::BridgeRequest& request, const xfx::Bri
         if (result.code != "cancelled") {
             ModalGuard modal;
             const HWND owner = g_state && IsWindow(g_state->window) ? g_state->window : GetForegroundWindow();
-            MessageBoxW(owner, utf8_to_wide(result.message.c_str()).c_str(),
+            show_message_box(owner, utf8_to_wide(result.message.c_str()).c_str(),
                 result.succeeded ? L"快照保存成功" : L"快照保存失败",
                 MB_OK | (result.succeeded ? MB_ICONINFORMATION : MB_ICONERROR));
         }
@@ -6218,7 +6230,7 @@ xfx::BridgeCompletion prepare_current_snapshot(fs::path& target) {
     target = fs::path(filename);
     if (CompareStringOrdinal(target.extension().c_str(), -1, L".png", -1, TRUE) != CSTR_EQUAL) {
         target += L".png";
-        if (fs::exists(target) && MessageBoxW(owner,
+        if (fs::exists(target) && show_message_box(owner,
                 (L"覆盖已存在的文件？\n" + target.wstring()).c_str(), L"确认替换图片",
                 MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
             set_status(L"已取消保存快照");
@@ -6283,7 +6295,7 @@ xfx::BridgeCompletion export_current_frame() {
         jpeg = dialog.nFilterIndex == 2;
         target = filename; target.replace_extension(jpeg ? L".jpg" : L".png");
         if (target != fs::path(filename) && fs::exists(target) &&
-            MessageBoxW(g_state->window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
+            show_message_box(g_state->window, (L"覆盖已存在的文件？\n" + target.wstring()).c_str(),
                 L"确认替换图片", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
             return {false, 0, "cancelled", wide_to_utf8(L"操作已取消")};
         }
@@ -6348,7 +6360,7 @@ xfx::BridgeCompletion dispatch_bridge_request(const xfx::BridgeRequest& request)
         ModalGuard modal;
         const auto about = L"效果控制台 " + utf8_to_wide(kProductVersion) +
             L"\n中文、全拼与首字母搜索\n\n更新源：GitHub 正式 Releases\n当前为功能对齐测试版，原版完整对照仍在进行。\n\n立即检查更新？";
-        if (MessageBoxW(g_state->window, about.c_str(), L"关于 效果控制台",
+        if (show_message_box(g_state->window, about.c_str(), L"关于 效果控制台",
             MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) return perform_update(true);
         return {true, 0, "", wide_to_utf8(L"关于窗口已关闭")};
     }

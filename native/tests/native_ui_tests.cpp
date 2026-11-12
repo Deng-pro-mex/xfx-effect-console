@@ -567,6 +567,50 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--first-apply-waits") {
+            // The first apply after AE starts is the one that produced AE's own error
+            // dialog. Simulate that exact situation end to end: the host is mid-dialog,
+            // an effect is applied, and the dialog then closes. The apply must run
+            // afterwards with no error and no dialog of ours.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            g_first_idle_tick = GetTickCount64() - 60000;   // past the startup settle window
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+
+            const int messages_before = g_test_message_box_count;
+            g_test_force_modal = true;
+            assert(execute_selected());          // stages the apply
+            assert(!g_pending_applies.empty());
+            // Several idle ticks while the host is still inside its dialog.
+            for (int tick = 0; tick < 8; ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(40);
+            }
+            assert(!g_pending_applies.empty());  // still waiting, never forced
+            assert(g_test_last_script.empty());  // nothing reached the host
+            assert(g_test_message_box_count == messages_before);
+
+            // The dialog closes: the next few idles must run it. The runner requires a
+            // short streak of clear idles by design, so tick for it rather than once.
+            g_test_force_modal = false;
+            bool ran = false;
+            for (int tick = 0; tick < 10 && !ran; ++tick) ran = run_pending_apply_on_idle();
+            assert(ran);
+            assert(g_pending_applies.empty());
+            assert(!g_test_last_script.empty()); // the script really reached the host
+            // And no dialog was shown to the user at any point.
+            assert(g_test_message_box_count == messages_before);
+            std::cout << "PASS the first apply waits out AE's dialog and runs afterwards, no popup\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--no-forced-run") {
             // The apply queue must never force a script through a modal loop. The old code
             // ran it anyway after 20 seconds; that call is exactly what AE answers with its
