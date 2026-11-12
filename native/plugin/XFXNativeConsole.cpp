@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.4";
+constexpr char kProductVersion[] = "1.5.5";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4130,6 +4130,14 @@ void show_result_menu(HWND hwnd, LPARAM location) {
     xfx::MenuActionRows slot_actions;
     append_slot_menu(slots,true,&slot_actions);
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(slots), L"快捷槽");
+    // The second strip is a separate set of nine bindings, so it gets its own submenu
+    // rather than being reachable only by dragging.
+    HMENU row_slots = CreatePopupMenu();
+    for (int slot = 0; slot < 9; ++slot) {
+        const auto label = std::to_wstring(slot + 1) + L" · " + menu_text(slot_row_display_label(slot));
+        AppendMenuW(row_slots, MF_STRING, static_cast<UINT>(70 + slot), label.c_str());
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(row_slots), L"第二行快捷栏");
     const UINT command=track_slot_actions(menu,point,hwnd,slot_actions);
     DestroyMenu(menu);
     if (command == 1) toggle_favorite();
@@ -4138,6 +4146,7 @@ void show_result_menu(HWND hwnd, LPARAM location) {
     if (command == 7) { save_item_aliases(key, {}); set_status(L"已清除自定义搜索别名",true); }
     if (command == 8) toggle_pinned(key);
     handle_slot_command(command);
+    if (command >= 70 && command <= 78) assign_row_slot(command - 70);
     if (command == 4) {
         wchar_t filename[32768] = {};
         OPENFILENAMEW dialog{sizeof(dialog)}; dialog.hwndOwner = hwnd;
