@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.7";
+constexpr char kProductVersion[] = "1.5.8";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -5001,8 +5001,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         static_assert(std::size(tools) == std::size(tips), "every control needs exactly one tip");
         for (size_t index = 0; index < std::size(tools) && g_state->tooltip; ++index)
             add_tooltip_for_control(hwnd, g_state->tooltip, tools[index], 100 + index, tips[index]);
+        for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+            wchar_t tip[256] = {};
+            swprintf_s(tip, L"第二行快捷栏 %zu：把搜索结果拖到这里，或右键绑定；单击执行",
+                index + 1);
+            if (g_state->tooltip)
+                add_tooltip_for_control(hwnd, g_state->tooltip, g_state->slot_row_buttons[index],
+                    600 + index, tip);
+        }
         if (g_state->tooltip) {
-            g_state->result_tooltip = L"鼠标左键应用；右键打开更多操作";
+            g_state->result_tooltip = L"左键应用；拖动到第二行快捷栏可绑定；右键打开更多操作";
             add_tooltip_for_control(hwnd, g_state->tooltip, g_state->results, kResultTooltipId,
                 g_state->result_tooltip.c_str());
         }
