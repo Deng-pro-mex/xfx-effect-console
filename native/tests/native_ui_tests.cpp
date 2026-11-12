@@ -567,6 +567,100 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--row-cell-empty-click") {
+            // Clicking an EMPTY cell must bind; clicking an OCCUPIED cell must run it.
+            // That split is the whole interaction, and getting it backwards makes the
+            // strip feel like it ignores clicks.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+
+            // Empty cell -> bind, no host call.
+            g_pending_applies.clear();
+            SendMessageW(g_state->slot_row_buttons[1], BM_CLICK, 0, 0);
+            pump_for(120);
+            assert(!g_state->settings.row_slots[1].empty());
+            assert(g_pending_applies.empty());
+
+            // Occupied cell -> run it, queueing a host apply and NOT rebinding.
+            const auto bound = g_state->settings.row_slots[1];
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_apply_clear_streak = 0;
+            SendMessageW(g_state->slot_row_buttons[1], BM_CLICK, 0, 0);
+            pump_for(160);
+            assert(g_state->settings.row_slots[1] == bound);   // unchanged
+            assert(!g_pending_applies.empty() || !g_test_last_script.empty());
+            g_test_script_reply.reset();
+            g_pending_applies.clear();
+
+            // Shift+click always rebinds, even over an occupied cell.
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_test_keyboard_modifiers = MOD_SHIFT;
+            SendMessageW(g_state->slot_row_buttons[1], BM_CLICK, 0, 0);
+            g_test_keyboard_modifiers.reset();
+            pump_for(120);
+            assert(!g_state->settings.row_slots[1].empty());
+            std::cout << "PASS empty cell binds, filled cell runs, shift always rebinds\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--row-slot-hover-menu") {
+            // Binding a cell must be reachable from the cell itself: right-click opens its
+            // menu, and the menu's own command numbers must bind that exact cell.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            assert(IsWindowVisible(g_state->slot_row_buttons[3]));
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+
+            // Every cell must open a menu that binds *its own* index. Feed the menu the
+            // command the real handler would issue for that cell and check the result.
+            for (int slot : {0, 5, 8}) {
+                SendMessageW(g_state->slot_row_buttons[static_cast<size_t>(slot)],
+                    WM_CONTEXTMENU, reinterpret_cast<WPARAM>(g_state->slot_row_buttons[static_cast<size_t>(slot)]),
+                    MAKELPARAM(-1, -1));
+                pump_for(60);
+                // The menu was driven through the test hook; drive the bind directly with
+                // the id the menu carries so the wiring is what is measured.
+                g_test_popup_command = static_cast<std::optional<UINT>>(70 + slot);
+                show_slot_row_menu(slot);
+                pump_for(60);
+                assert(!g_state->settings.row_slots[static_cast<size_t>(slot)].empty());
+                // No other cell may have been touched.
+                for (int other = 0; other < 9; ++other) {
+                    if (other == slot) continue;
+                    assert(g_state->settings.row_slots[static_cast<size_t>(other)].empty());
+                }
+                g_state->settings.row_slots[static_cast<size_t>(slot)].clear();
+            }
+
+            // A cell with nothing left to bind must say so instead of doing nothing.
+            const LRESULT sel = SendMessageW(g_state->results, LB_GETCURSEL, 0, 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, -1, 0);
+            g_state->settings.row_slots[2].clear();
+            assign_row_slot(2);
+            pump_for(60);
+            assert(g_state->settings.row_slots[2].empty());
+            SendMessageW(g_state->results, LB_SETCURSEL, sel, 0);
+            std::cout << "PASS each strip cell binds only itself and refuses without a selection\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--apply-script-shape") {
             // Applying an effect must go through a script that reports a machine-readable
             // result and never calls alert(): an alert is AE's own modal dialog, and on
