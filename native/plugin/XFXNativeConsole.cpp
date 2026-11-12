@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.14";
+constexpr char kProductVersion[] = "1.5.15";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1034,6 +1034,8 @@ UINT current_hotkey_modifiers() {
     return modifiers;
 }
 
+void update_trace(const std::string& text, bool always = false);
+
 // Index of the second-strip cell under the given screen point, or -1.
 int slot_row_cell_at(POINT point) {
     if (!g_state) return -1;
@@ -1067,6 +1069,8 @@ void update_result_drag_target() {
     const int target = slot_row_cell_at(cursor);
     if (target == g_state->result_drag_target) return;
     g_state->result_drag_target = target;
+    update_trace("drag-target=" + std::to_string(target) + " cursor=" +
+        std::to_string(cursor.x) + "," + std::to_string(cursor.y));
     repaint_slot_row_cells();
 }
 
@@ -1196,7 +1200,7 @@ bool ensure_hotkey_window() {
 }
 
 
-void update_trace(const std::string& text, bool always = false);
+void update_trace(const std::string& text, bool always);
 void export_diagnostic_log();
 
 void set_status(const std::wstring& message, bool success = false) {
@@ -1856,6 +1860,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_drag_armed = row >= 0;
             g_state->result_drag_row = row;
             g_state->result_drag_target = -1;
+            update_trace("drag-arm row=" + std::to_string(row));
             SetFocus(hwnd);
             SetCapture(hwnd);
             return 0;
@@ -1894,6 +1899,8 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             const int drop_target = g_state->result_drag_target;
             const int drop_row = g_state->result_drag_row >= 0 ?
                 g_state->result_drag_row : pending_row;
+            update_trace("drag-drop target=" + std::to_string(drop_target) +
+                " row=" + std::to_string(drop_row));
             g_state->result_drag_armed = false;
             g_state->result_drag_row = -1;
             g_state->result_drag_target = -1;
@@ -1988,6 +1995,9 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             update_result_drag_target();
             const int stolen_target = g_state->result_drag_target;
             const int stolen_row = g_state->result_drag_row;
+            update_trace("drag-capture-changed target=" + std::to_string(stolen_target) +
+                " row=" + std::to_string(stolen_row) +
+                " pending=" + (g_state->result_click_pending ? "1" : "0"));
             if (stolen_target >= 0 && stolen_row >= 0 && !g_state->result_click_pending) {
                 g_state->result_drag_armed = false;
                 g_state->result_drag_row = -1;
@@ -3687,6 +3697,7 @@ void assign_row_slot_dragged(int slot, int row) {
     catch (...) { set_status(L"第二行快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
     g_state->settings = std::move(updated);
     const auto label = item_display_label(*item);
+    update_trace("drag-bind slot=" + std::to_string(slot) + " row=" + std::to_string(row));
     set_status(L"已把「" + label + L"」绑定到第二行快捷栏 " + std::to_wstring(slot + 1), true);
     // The cell is ownerdraw and reads the settings when it paints. Saving alone changes
     // nothing on screen, which is why a successful drag looked like no bind at all.
