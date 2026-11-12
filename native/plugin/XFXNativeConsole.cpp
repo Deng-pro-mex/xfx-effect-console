@@ -122,12 +122,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.3.0";
+constexpr char kProductVersion[] = "1.3.1";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 280;
+constexpr int kSettingsHeight = 236;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -1308,6 +1308,9 @@ UINT current_modifiers() {
     return modifiers;
 }
 
+xfx::ScriptReply execute_row_slot(int slot);
+void assign_row_slot(int slot);
+
 bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     // Runs the favourites strip. The modifier is user configurable so it cannot clash
     // with the plain-digit "apply Nth result" shortcut.
@@ -1316,11 +1319,11 @@ bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     if (slot < 0) return false;
     const UINT required = modifier_from_text(g_state->settings.slot_row_modifier);
     if (current_modifiers() != required) return false;
-    if (g_state->settings.slots[static_cast<size_t>(slot)].empty()) return false;
+    if (g_state->settings.row_slots[static_cast<size_t>(slot)].empty()) return false;
     // Inside the search box the user may be typing; only a non-empty modifier makes
     // this an unambiguous shortcut.
     if (in_search && required == 0 && GetWindowTextLengthW(g_state->search) != 0) return false;
-    if (!(flags & (1L << 30))) execute_slot(slot);
+    if (!(flags & (1L << 30))) execute_row_slot(slot);
     return true;
 }
 
@@ -1425,6 +1428,45 @@ bool point_in_search_surface(HWND hwnd, POINT point) {
         IsWindowEnabled(g_state->search) && PtInRect(&g_state->search_surface_bounds,point);
 }
 
+// How many polls in a row a key must stay down before it counts, and how often the
+// poller runs. 15 ms is fast enough to feel instant and slow enough to cost nothing.
+constexpr int kHotkeyPollTimerId = 0xB010;
+constexpr UINT kHotkeyPollIntervalMs = 15;
+
+// Reads the physical keyboard and records the first complete combination. This is the
+// fallback path: it works even when key messages are swallowed by the host or the IME,
+// which is exactly the reported symptom of a press being ignored.
+void capture_hotkey_from_keyboard_state(HWND hwnd) {
+    if (!g_state || !IsWindow(hwnd) || GetFocus() != hwnd) return;
+    static UINT last_key = 0;
+    const auto chosen = [&](UINT key) {
+        xfx::HotkeySpec spec;
+        if (GetKeyState(VK_CONTROL) & 0x8000) spec.modifiers |= MOD_CONTROL;
+        if (GetKeyState(VK_MENU) & 0x8000) spec.modifiers |= MOD_ALT;
+        if (GetKeyState(VK_SHIFT) & 0x8000) spec.modifiers |= MOD_SHIFT;
+        if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) spec.modifiers |= MOD_WIN;
+        // Hold test: without a modifier this would hijack ordinary typing.
+        if (spec.modifiers == 0) return false;
+        spec.virtual_key = key;
+        const std::wstring text = xfx::format_hotkey(spec);
+        if (text.empty()) return false;
+        SetWindowTextW(hwnd, text.c_str());
+        save_hotkey();
+        KillTimer(hwnd, kHotkeyPollTimerId);
+        SetFocus(g_state->search);
+        return true;
+    };
+    // Everything except the modifier keys themselves counts as the final key.
+    for (UINT key = 0x08; key <= 0xFE; ++key) {
+        if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU ||
+            key == VK_LWIN || key == VK_RWIN) continue;
+        if (!(GetAsyncKeyState(static_cast<int>(key)) & 0x8000)) continue;
+        if (key == last_key) continue;   // still the same press
+        last_key = key;
+        if (chosen(key)) return;
+    }
+}
+
 LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     return guarded_callback([&]() -> LRESULT {
     if (message == WM_SETFONT) {
@@ -1501,7 +1543,10 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             }
             // Immediate feedback the moment the box is clicked, so the user knows the
             // plugin is listening instead of guessing whether the click registered.
-            set_status(L"正在录制快捷键：请按下组合键（如 Ctrl+Alt+Space），Esc 取消");
+            set_status(L"正在录制快捷键：请按住修饰键再按一个键，Esc 取消");
+            // Belt and braces: the message path handles normal presses, the poller
+            // catches presses whose messages the host or the IME consumed.
+            SetTimer(hwnd, kHotkeyPollTimerId, kHotkeyPollIntervalMs, nullptr);
         }
         if (g_state && g_state->hotkey_window &&
             (message == WM_SETFOCUS || message == WM_KILLFOCUS)) {
@@ -1512,6 +1557,7 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
                 SetPropW(g_state->hotkey_window, L"XFXHotkeyCapture",
                          reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
             } else {
+                KillTimer(hwnd, kHotkeyPollTimerId);
                 RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
                 // Leaving the box without recording something must not leave the
                 // console without a working shortcut.
@@ -1522,12 +1568,20 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
+    if (message == WM_TIMER && wparam == kHotkeyPollTimerId) {
+        // Fallback capture. AE and some IMEs eat the key-down messages that would
+        // otherwise reach this box, which is why recording could appear to ignore a
+        // press. Polling the physical key state does not depend on message delivery.
+        capture_hotkey_from_keyboard_state(hwnd);
+        return 0;
+    }
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
         const UINT key = static_cast<UINT>(wparam);
         if (key == VK_ESCAPE) {
             // Cancel leaves the stored shortcut untouched, but the registration that was
             // released for recording must come back.
             SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
+            KillTimer(hwnd, kHotkeyPollTimerId);
             restore_suspended_hotkey();
             set_status(L"已取消录制，快捷键未修改", true);
             SetFocus(g_state->search);
@@ -1574,6 +1628,7 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         SetWindowTextW(hwnd, text.c_str());
         // save_hotkey reports the concrete outcome (registered, or rejected because
         // another program already owns the combination).
+        KillTimer(hwnd, kHotkeyPollTimerId);
         save_hotkey();
         return 0;
     }
@@ -3314,7 +3369,7 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             const size_t index = static_cast<size_t>(draw->CtlID - kSlotRowFirstId);
             std::wstring label = g_state->settings.slot_button_labels[index];
             if (label.empty()) {
-                const auto& key = g_state->settings.slots[index];
+                const auto& key = g_state->settings.row_slots[index];
                 label = key.empty() ? std::to_wstring(index + 1) : L"…";
                 for (const auto& item : g_state->catalog) {
                     if (item_key(item) == key) { label = item_display_label(item); break; }
@@ -3331,11 +3386,13 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
                 DRAWITEMSTRUCT frame = *draw;
                 frame.hDC = buffer;
                 frame.rcItem = {0, 0, width, height};
+                // Same paint path and same font as the style strip above, so the two
+                // rows read as one family instead of two different toolbars.
                 paint_text_button(frame);
                 SetBkMode(buffer, TRANSPARENT);
-                SetTextColor(buffer, (draw->itemState & ODS_SELECTED) ? colors().selected_text : colors().text);
-                RECT text_rect{2, 0, width - 2, height};
-                SelectObject(buffer, g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+                SetTextColor(buffer, (draw->itemState & ODS_DISABLED) ? colors().disabled : colors().text);
+                SelectObject(buffer, g_state->font);
+                RECT text_rect = frame.rcItem;
                 DrawTextW(buffer, label.c_str(), -1, &text_rect,
                     DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
                 BitBlt(draw->hDC, draw->rcItem.left, draw->rcItem.top, width, height,
@@ -3579,6 +3636,42 @@ bool execute_selected() {
         return false;
     }
     return execute_item(*item).succeeded;
+}
+
+xfx::ScriptReply execute_row_slot(int slot) {
+    xfx::ScriptReply failure;
+    failure.message = wide_to_utf8(L"第二行快捷栏中的项目已失效，请重新绑定");
+    if (slot < 0 || slot >= static_cast<int>(g_state->settings.row_slots.size())) return failure;
+    const std::wstring key = g_state->settings.row_slots[static_cast<size_t>(slot)];
+    if (key.empty()) {
+        set_status(L"该快捷栏为空，可右键或按住 Shift 点击来绑定当前搜索结果");
+        failure.message = wide_to_utf8(L"该快捷栏为空，请先绑定一个效果或预设");
+        return failure;
+    }
+    for (const auto& item : g_state->catalog) {
+        if (item_key(item) == key) return execute_item(item);
+    }
+    set_status(L"第二行快捷栏中的项目已失效，请重新绑定");
+    return failure;
+}
+
+void assign_row_slot(int slot) {
+    if (!g_state) return;
+    const LRESULT selected = SendMessageW(g_state->results, LB_GETCURSEL, 0, 0);
+    if (selected == LB_ERR) { set_status(L"请先选择一个项目"); return; }
+    const LRESULT data = SendMessageW(g_state->results, LB_GETITEMDATA, selected, 0);
+    if (data == LB_ERR || data == 0) { set_status(L"请先选择一个项目"); return; }
+    const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
+    if (!item || slot < 0 || slot >= 9) return;
+    auto updated = g_state->settings;
+    updated.row_slots[static_cast<size_t>(slot)] = item_key(*item);
+    try { xfx::SettingsStore::save(settings_path(), updated); }
+    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    g_state->settings = std::move(updated);
+    set_status(L"已绑定到第二行快捷栏 " + std::to_wstring(slot + 1), true);
+    InvalidateRect(g_state->window, nullptr, FALSE);
+    if (IsWindow(g_state->window))
+        RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 xfx::ScriptReply execute_slot(int slot) {
@@ -4092,7 +4185,7 @@ void layout_controls(HWND hwnd) {
     const int footer = height - 22 - g_state->settings_extent;
     const int styles_top = footer - kLayerStyleRowHeight;
     // Optional favourites strip sits directly above the style row.
-    const bool favourites_row = g_state->settings.show_slot_row;
+    const bool favourites_row = g_state->settings.show_slot_row && !g_state->settings_visible;
     const int slot_row_height = favourites_row ? kSlotRowHeight : 0;
     const int slot_row_top = styles_top - slot_row_height;
     move(g_state->results, margin, 56, inner,
@@ -4110,10 +4203,14 @@ void layout_controls(HWND hwnd) {
     }
     // Separate always-visible row below the shortcut/results area. Preserve
     // numeric 1-9 bindings and search results; compact labels have full tips.
+    // The strip is hidden while the settings page is open: it belongs to the search
+    // panel, and leaving it there makes the settings grid look like it has leftovers.
+    const bool show_style_strip = !g_state->settings_visible;
     for (size_t index = 0; index < g_state->layer_style_buttons.size(); ++index) {
         const int left = margin + static_cast<int>(index) * inner / 9;
         const int right = margin + static_cast<int>(index + 1) * inner / 9;
         move(g_state->layer_style_buttons[index], left, styles_top + 4, right - left - 3, 28);
+        ShowWindow(g_state->layer_style_buttons[index], show_style_strip ? SW_SHOWNA : SW_HIDE);
         apply_button_region(g_state->layer_style_buttons[index]);
     }
     const bool narrow = width < 440;
@@ -4124,34 +4221,51 @@ void layout_controls(HWND hwnd) {
         if (should_show != is_visible || !g_state->settings_animation_active)
             ShowWindow(child, should_show ? SW_SHOWNA : SW_HIDE);
     };
-    setting(g_state->refresh,8,6,80,28); setting(g_state->dictionary,92,6,80,28);
-    setting(g_state->count,180,10,inner-172,22);
-    setting(g_state->hotkey_label,8,40,62,26); setting(g_state->hotkey_edit,74,40,128,26);
-    setting(g_state->hotkey_save,210,40,52,26);
-    setting(g_state->import_settings,narrow?8:270,narrow?72:40,64,26);
-    setting(g_state->export_settings,narrow?80:342,narrow?72:40,64,26);
-    const int theme_y = narrow ? 106 : 74;
-    setting(g_state->ime_mode_combo,8,theme_y,narrow?inner-140:(inner-260),28,24);
-    setting(g_state->light_theme,width-136,theme_y+(narrow?30:-2),128,28,24);
-    // Results digit-shortcut switch: same row as the update button on wide layouts,
-    // and its own row on narrow ones so nothing overlaps.
-    const int digit_y = narrow ? 164 : 106;
-    setting(g_state->result_digit_checkbox, narrow ? 8 : 200, digit_y, narrow ? inner : inner - 200, 24);
-    // Optional favourites strip + its key, on one row.
-    const int slotrow_y = digit_y + 28;
-    setting(g_state->slot_row_checkbox, 8, slotrow_y, narrow ? inner : 150, 24);
-    setting(g_state->slot_row_key, narrow ? 8 : 164, narrow ? slotrow_y + 28 : slotrow_y,
-            narrow ? 110 : 96, 26, 24);
-    setting(g_state->slot_row_hint, narrow ? 8 : 264, narrow ? slotrow_y + 56 : slotrow_y,
-            narrow ? inner : inner - 264, 24, 20);
-    // The result-digit modifier lives on its own row below the existing checkbox.
-    const int digitkey_y = slotrow_y + (narrow ? 84 : 28);
-    setting(g_state->result_digit_key, 8, digitkey_y, 110, 26, 24);
-    setting(g_state->result_digit_hint, 122, digitkey_y, inner - 122, 24, 20);
-    const int diagnostic_y = digitkey_y + 30;
-    const int export_width = 76;
-    setting(g_state->export_log_button, inner - export_width, diagnostic_y, export_width, 24);
-    const int update_y = diagnostic_y + 30;
+    // Settings use one column grid: every row starts at the same left edge, every
+    // control shares the same height, and the label column is a fixed width so the
+    // inputs line up vertically instead of drifting with their text length.
+    const int row_h = 26;
+    const int gap = 8;
+    const int label_w = narrow ? 0 : 96;
+    const int field_x = narrow ? 8 : 8 + label_w;
+    const int field_w = narrow ? inner : inner - label_w;
+    const int full_w = inner;
+    int row = 6;
+    const auto next_row = [&](int height) { const int y = row; row += height + gap; return y; };
+
+    int y = next_row(28);
+    setting(g_state->refresh, 8, y, 80, 28);
+    setting(g_state->dictionary, 92, y, 80, 28);
+    setting(g_state->count, 180, y + 4, inner - 172, 22);
+
+    y = next_row(26);
+    setting(g_state->hotkey_label, 8, y, 62, row_h);
+    setting(g_state->hotkey_edit, 74, y, 128, row_h);
+    setting(g_state->hotkey_save, 210, y, 52, row_h);
+    setting(g_state->import_settings, 270, y, 64, row_h);
+    setting(g_state->export_settings, 342, y, 64, row_h);
+
+    y = next_row(28);
+    setting(g_state->ime_mode_combo, field_x, y, (std::max)(120, field_w - 136), 28, 24);
+    setting(g_state->light_theme, inner + 8 - 128, y, 128, 28, 24);
+
+    // Two shortcut groups, one aligned row each: [switch/label] [key dropdown] [hint]
+    y = next_row(row_h);
+    setting(g_state->slot_row_checkbox, field_x, y, 150, row_h);
+    setting(g_state->slot_row_key, field_x + 154, y, 108, row_h, 24);
+    setting(g_state->slot_row_hint, field_x + 266, y, (std::max)(0, inner - 266), row_h, 20);
+
+    y = next_row(row_h);
+    setting(g_state->result_digit_checkbox, field_x, y, 150, row_h, 20);
+    setting(g_state->result_digit_key, field_x + 154, y, 108, row_h, 24);
+    setting(g_state->result_digit_hint, field_x + 266, y, (std::max)(0, inner - 266), row_h, 20);
+
+    y = next_row(row_h);
+    setting(g_state->export_log_button, inner + 8 - 84, y, 84, row_h);
+
+    const int diagnostic_y = y;
+    const int export_width = 84;
+    const int update_y = diagnostic_y + row_h + gap;
     const bool update_in_settings = g_state->settings_extent >= update_y + 26;
     const bool update_in_footer = g_state->update_available && !update_in_settings;
     if (update_in_settings) {
@@ -4708,7 +4822,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?330:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?300:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -5088,7 +5202,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 330 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 300 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
@@ -5165,9 +5279,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (LOWORD(wparam) >= kSlotRowFirstId &&
             LOWORD(wparam) < kSlotRowFirstId + 9 && HIWORD(wparam) == BN_CLICKED) {
             const int index = LOWORD(wparam) - kSlotRowFirstId;
-            if (GetKeyState(VK_SHIFT) & 0x8000) assign_slot(index);
+            if (GetKeyState(VK_SHIFT) & 0x8000) assign_row_slot(index);
             else {
-                const auto reply = execute_slot(index);
+                const auto reply = execute_row_slot(index);
                 if (!reply.pending) set_status(utf8_to_wide(reply.message.c_str()), reply.succeeded);
             }
             return 0;

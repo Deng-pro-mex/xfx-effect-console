@@ -163,6 +163,21 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
             settings.slot_row_modifier = line.substr(16);
         } else if (line.rfind(L"ResultDigitModifier=", 0) == 0) {
             settings.result_digit_modifier = line.substr(20);
+        } else if (line.rfind(L"RowSlot", 0) == 0) {
+            // RowSlotN=key for the optional second strip.
+            const bool is_label = line.rfind(L"RowSlotLabel", 0) == 0;
+            const size_t offset = is_label ? 13 : 7;
+            const auto rest = line.substr(offset);
+            const auto equals = rest.find(L'=');
+            if (equals != std::wstring::npos) {
+                try {
+                    const int index = std::stoi(rest.substr(0, equals));
+                    if (index >= 0 && index < 9) {
+                        if (is_label) settings.slot_button_labels[static_cast<size_t>(index)] = rest.substr(equals + 1);
+                        else settings.row_slots[static_cast<size_t>(index)] = rest.substr(equals + 1);
+                    }
+                } catch (...) { throw std::invalid_argument("第二行快捷栏索引必须是 0-8 的数字。"); }
+            }
         } else if (line.rfind(L"SlotButtonLabel=", 0) == 0) {
             const auto rest = line.substr(16);
             const auto tab = rest.find(L'=');
@@ -235,6 +250,10 @@ void SettingsStore::save(const std::filesystem::path& path, const Settings& sett
     for (size_t index = 0; index < settings.slot_button_labels.size(); ++index) {
         if (settings.slot_button_labels[index].empty()) continue;
         output << L"SlotButtonLabel=" << index << L"=" << settings.slot_button_labels[index] << L"\r\n";
+    }
+    for (size_t index = 0; index < settings.row_slots.size(); ++index) {
+        if (settings.row_slots[index].empty()) continue;
+        output << L"RowSlot" << index << L"=" << settings.row_slots[index] << L"\r\n";
     }
     output << L"LightTheme=" << (settings.light_theme ? L"1" : L"0") << L"\r\n";
     output << L"ThemeMode=" << (settings.theme_mode == ThemeMode::Follow ? L"follow" :

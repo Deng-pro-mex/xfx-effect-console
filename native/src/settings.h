@@ -39,6 +39,9 @@ struct Settings {
     std::wstring result_digit_modifier = L"";
     // Text shown in each of the nine favourites buttons.
     std::array<std::wstring, 9> slot_button_labels{};
+    // Independent bindings for the optional second strip. Kept separate from `slots`
+    // so the two strips never overwrite each other.
+    std::array<std::wstring, 9> row_slots{};
     // Diagnostics are always on and not user configurable; the flag is kept so an
     // imported older settings file still parses.
     bool diagnostic_logging = true;
