@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.9";
+constexpr char kProductVersion[] = "1.5.10";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2380,9 +2380,19 @@ bool is_modal_script_rejection(const std::string& message) {
     if (message.empty()) return false;
     std::string lower = message;
     for (auto& ch : lower) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    // AE's Simplified-Chinese wording is "当模式对话框正在等待回应时，无法运行脚本".
+    // The previous needle spelled it 模态对话框 - one character apart - so it matched
+    // nothing and the retry never ran. Keep both spellings plus the action clause:
+    // matching any one of them is enough, and a false positive only delays an apply
+    // that would have failed anyway.
     for (const char* needle : {
-             "modal dialog", "while a modal", "mode dialog",
-             "\xe6\xa8\xa1\xe6\x80\x81\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86"}) {
+             "modal dialog", "while a modal", "modal loop", "cannot run a script",
+             // 模式对话框 (what AE 25.4 actually prints)
+             "\xe6\xa8\xa1\xe5\xbc\x8f\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86",
+             // 模态对话框 (the other spelling)
+             "\xe6\xa8\xa1\xe6\x80\x81\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86",
+             // 无法运行脚本 (the action clause)
+             "\xe6\x97\xa0\xe6\xb3\x95\xe8\xbf\x90\xe8\xa1\x8c\xe8\x84\x9a\xe6\x9c\xac"}) {
         if (lower.find(needle) != std::string::npos) return true;
     }
     return false;

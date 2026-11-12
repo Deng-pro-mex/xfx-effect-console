@@ -567,6 +567,30 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--modal-text") {
+            // The exact string AE 25.4 zh-CN returns when it refuses a script because its
+            // own dialog is up. The detector used to spell this 模态 instead of 模式, so it
+            // matched nothing and the retry never ran - that was the first-use popup.
+            const char* real_host_reply =
+                "After Effects\xe9\x94\x99\xe8\xaf\xaf: "
+                "\xe5\xbd\x93\xe6\xa8\xa1\xe5\xbc\x8f\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86"
+                "\xe6\xad\xa3\xe5\x9c\xa8\xe7\xad\x89\xe5\xbe\x85\xe5\x9b\x9e\xe5\xba\x94"
+                "\xe6\x97\xb6\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe8\xbf\x90\xe8\xa1\x8c"
+                "\xe8\x84\x9a\xe6\x9c\xac\xe3\x80\x82";
+            assert(is_modal_script_rejection(real_host_reply));
+            // The other spelling, and the English host, must also be recognised.
+            assert(is_modal_script_rejection(
+                "After Effects \xe9\x94\x99\xe8\xaf\xaf: "
+                "\xe6\xa8\xa1\xe6\x80\x81\xe5\xaf\xb9\xe8\xaf\x9d\xe6\xa1\x86"));
+            assert(is_modal_script_rejection("cannot run a script while a modal dialog is waiting"));
+            // An ordinary failure must not be mistaken for a modal refusal: retrying it
+            // would hide the real error for 20 seconds.
+            assert(!is_modal_script_rejection("\xe8\xaf\xb7\xe5\x85\x88\xe6\x89\x93\xe5\xbc\x80 AE \xe9\xa1\xb9\xe7\x9b\xae"));
+            assert(!is_modal_script_rejection(""));
+            std::cout << "PASS the real zh-CN modal refusal text is detected and normal errors are not\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--slot-row-menu") {
             show_console();
             g_state->settings.show_slot_row = true;
