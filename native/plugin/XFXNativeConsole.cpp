@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.3";
+constexpr char kProductVersion[] = "1.5.4";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4952,11 +4952,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 utf8_to_wide(style.english_name) + L")：添加/启用到所选图层，保留已有参数；Ctrl+Z 撤销";
             if (g_state->tooltip) add_tooltip_for_control(hwnd, g_state->tooltip, button, 500 + index, tip.c_str());
         }
+        // One tip per control, in the same order. These two lists are read positionally,
+        // so a single missing entry would silently shift every later tip onto the wrong
+        // control - which is exactly what happened when the shortcut capture box was
+        // replaced by a dropdown.
         const HWND tools[] = {
             g_state->search, g_state->filter, g_state->capture, g_state->slot, g_state->preferences,
-            g_state->refresh, g_state->dictionary,
-            g_state->hotkey_combo, g_state->import_settings, g_state->export_settings,
-            g_state->ime_mode_combo, g_state->light_theme
+            g_state->refresh, g_state->dictionary, g_state->hotkey_combo,
+            g_state->import_settings, g_state->export_settings,
+            g_state->ime_mode_combo, g_state->light_theme,
+            g_state->slot_row_key, g_state->result_digit_key
         };
         const wchar_t* tips[] = {
             L"搜索效果、预设、中文、拼音、英文或 matchName",
@@ -4966,13 +4971,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             L"展开或收起设置",
             L"重新扫描效果与预设",
             L"编辑中文译名",
-            L"点击后按下新的快捷键",
-            L"保存快捷键",
+            L"唤起面板的快捷键：从列表里选，选完立即生效",
             L"导入配置",
             L"导出配置",
             L"使用期间切换输入法为英文模式",
-            L"界面主题：跟随 AE、浅色或深色；选择会保存"
+            L"界面主题：跟随 AE、浅色或深色；选择会保存",
+            L"第二行快捷栏的按键：从列表里选，或直接右键格子绑定",
+            L"数字键 1-9 应用搜索结果时的修饰键"
         };
+        static_assert(std::size(tools) == std::size(tips), "every control needs exactly one tip");
         for (size_t index = 0; index < std::size(tools) && g_state->tooltip; ++index)
             add_tooltip_for_control(hwnd, g_state->tooltip, tools[index], 100 + index, tips[index]);
         if (g_state->tooltip) {
