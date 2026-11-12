@@ -561,6 +561,42 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--slot-row-menu") {
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.row_slots[5].clear();
+            layout_controls(g_state->window);
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(160);
+            assert(IsWindowVisible(g_state->slot_row_buttons[5]));
+            // Nothing selected: binding must refuse instead of silently doing nothing.
+            SendMessageW(g_state->results, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            g_test_popup_command = 70 + 5;   // "bind here" in the strip menu
+            SendMessageW(g_state->slot_row_buttons[5], WM_CONTEXTMENU,
+                reinterpret_cast<WPARAM>(g_state->slot_row_buttons[5]), MAKELPARAM(-1, -1));
+            pump();
+            assert(g_state->settings.row_slots[5].empty());
+            // Select a row, then bind through the same menu command.
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_test_popup_command = 70 + 5;
+            SendMessageW(g_state->slot_row_buttons[5], WM_CONTEXTMENU,
+                reinterpret_cast<WPARAM>(g_state->slot_row_buttons[5]), MAKELPARAM(-1, -1));
+            pump();
+            assert(!g_state->settings.row_slots[5].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[5] ==
+                g_state->settings.row_slots[5]);
+            // And clear it through the same menu.
+            g_test_popup_command = 80 + 5;
+            SendMessageW(g_state->slot_row_buttons[5], WM_CONTEXTMENU,
+                reinterpret_cast<WPARAM>(g_state->slot_row_buttons[5]), MAKELPARAM(-1, -1));
+            pump();
+            assert(g_state->settings.row_slots[5].empty());
+            std::cout << "PASS second strip context menu binds and clears a cell\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--hotkey-combo") {
             show_console();
             SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);

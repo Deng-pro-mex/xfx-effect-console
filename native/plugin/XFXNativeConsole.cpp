@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.2";
+constexpr char kProductVersion[] = "1.5.3";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -839,16 +839,20 @@ void start_button_ripple(HWND hwnd, POINT point) {
 bool forward_edge_drag(HWND child, UINT message, WPARAM wparam, LPARAM lparam);
 xfx::ScriptReply execute_row_slot(int slot);
 void assign_row_slot(int slot);
+// Context menu for one second-strip cell: bind / run / clear.
+void show_slot_row_menu(int slot);
 // Binds an explicit list row; drag-and-drop resolves the row before selection changes.
 void assign_row_slot_dragged(int slot, int row);
 
 LRESULT CALLBACK button_hover_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR) {
-    // Right-click on a second-strip button binds the selected search result to it.
+    // Right-click on a second-strip button opens its own menu: bind the selected search
+    // result, run the bound item, or clear the slot. The old one-click bind gave no way
+    // back and failed silently when nothing was selected.
     if (g_state && message == WM_CONTEXTMENU) {
         for (int index = 0; index < 9; ++index) {
             if (g_state->slot_row_buttons[static_cast<size_t>(index)] != hwnd) continue;
-            assign_row_slot(index);
+            show_slot_row_menu(index);
             return 0;
         }
     }
@@ -2463,6 +2467,10 @@ ULONGLONG g_first_idle_tick = 0;
 int g_apply_clear_streak = 0;
 constexpr int kRequiredClearStreak = 3;
 constexpr ULONGLONG kStartupSettleMs = 1200;
+// How long a modal-script refusal is treated as "wait and retry". After a restart AE
+// can hold its own dialog open for a few seconds while the project loads; the apply
+// must survive that quietly instead of showing an error the user never asked for.
+constexpr ULONGLONG kModalRetryBudgetMs = 20000;
 
 // Stages an apply for the next idle callback. Returns immediately.
 void stage_apply(std::string script, std::wstring item_key, bool remember, bool close_console) {
@@ -2632,7 +2640,18 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         const bool modal_text = is_modal_script_rejection(script_error) ||
             is_modal_script_rejection(result);
         if (modal_text) update_trace("modal-rejection: " + script_error.substr(0, 200), true);
-        if (modal_text || (error && early_session)) {
+        // Retry while the host is still unwinding its own dialog. This is the popup the
+        // user saw on the very first apply after starting AE: AE refuses the script,
+        // returns the refusal as text, and a single retry was not enough because the
+        // modal loop can outlive it by seconds. Retry on a wall-clock budget instead of
+        // a count - the idle hook fires many times per second.
+        static thread_local ULONGLONG g_modal_retry_since = 0;
+        const ULONGLONG retry_now = GetTickCount64();
+        if (modal_text) { if (!g_modal_retry_since) g_modal_retry_since = retry_now; }
+        else g_modal_retry_since = 0;
+        const bool retry_modal = modal_text && g_modal_retry_since &&
+            retry_now - g_modal_retry_since < kModalRetryBudgetMs;
+        if (retry_modal || (error && early_session)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
             if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
@@ -3598,6 +3617,11 @@ void assign_row_slot_dragged(int slot, int row) {
     g_state->settings = std::move(updated);
     const auto label = item_display_label(*item);
     set_status(L"已把「" + label + L"」绑定到快捷栏 " + std::to_wstring(slot + 1), true);
+    // The cell is ownerdraw and reads the settings when it paints. Saving alone changes
+    // nothing on screen, which is why a successful drag looked like no bind at all.
+    repaint_slot_row_cells();
+    if (IsWindow(g_state->window))
+        RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 xfx::ScriptReply execute_row_slot(int slot) {
@@ -3619,8 +3643,14 @@ xfx::ScriptReply execute_row_slot(int slot) {
 
 void assign_row_slot(int slot) {
     if (!g_state) return;
+    // Binding needs the strip on screen; otherwise the user clicks a hidden control and
+    // nothing appears to happen.
+    if (!g_state->settings.show_slot_row) {
+        set_status(L"第二行快捷栏已关闭，请先在设置里打开它再绑定");
+        return;
+    }
     const LRESULT selected = SendMessageW(g_state->results, LB_GETCURSEL, 0, 0);
-    if (selected == LB_ERR) { set_status(L"请先选择一个项目"); return; }
+    if (selected == LB_ERR) { set_status(L"请先在搜索结果里选中一个效果，再绑定到第二行"); return; }
     const LRESULT data = SendMessageW(g_state->results, LB_GETITEMDATA, selected, 0);
     if (data == LB_ERR || data == 0) { set_status(L"请先选择一个项目"); return; }
     const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
@@ -3909,6 +3939,39 @@ void edit_slot_label(int slot) {
     set_status(L"快捷槽备注已保存",true);
 }
 
+// What a second-strip cell shows in a menu (and never blank).
+std::wstring slot_row_display_label(int slot) {
+    if (!g_state || slot < 0 || slot >= 9) return L"空";
+    const auto& key = g_state->settings.row_slots[static_cast<size_t>(slot)];
+    if (key.empty()) return L"空";
+    for (const auto& item : g_state->catalog)
+        if (item_key(item) == key) return item_display_label(item);
+    return L"项目已失效";
+}
+
+// Whether a search result is selected that could be bound to a strip cell.
+bool selected_row_can_bind() {
+    if (!g_state) return false;
+    const auto row = SendMessageW(g_state->results, LB_GETCURSEL, 0, 0);
+    if (row == LB_ERR) return false;
+    const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, row, 0);
+    if (!data || data == LB_ERR) return false;
+    return reinterpret_cast<const xfx::CatalogItem*>(data)->item_type != L"empty";
+}
+
+void clear_row_slot(int slot) {
+    if (!g_state || slot < 0 || slot >= 9) return;
+    auto updated = g_state->settings;
+    updated.row_slots[static_cast<size_t>(slot)].clear();
+    try { xfx::SettingsStore::save(settings_path(), updated); }
+    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    g_state->settings = std::move(updated);
+    repaint_slot_row_cells();
+    if (IsWindow(g_state->window))
+        RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    set_status(L"已清空第二行快捷栏 " + std::to_wstring(slot + 1), true);
+}
+
 void clear_slot(int slot) {
     if (slot < 0 || slot >= 9) return;
     auto updated = g_state->settings;
@@ -3996,6 +4059,29 @@ void show_slot_menu(int slot, POINT point) {
     append_slot_action_row(menu,slot,selected_item_can_bind(),&rows);
     const auto command=track_slot_actions(menu,point,g_state->window,rows);
     DestroyMenu(menu);handle_slot_command(command);
+}
+
+// One cell of the second strip. Commands are numbered in their own range so they can
+// never collide with the first-strip menu commands handled by handle_slot_command.
+void show_slot_row_menu(int slot) {
+    if (slot < 0 || slot >= 9) return;
+    ModalGuard modal;
+    HMENU menu = CreatePopupMenu();
+    xfx::MenuActionRows rows;
+    const bool occupied = !g_state->settings.row_slots[static_cast<size_t>(slot)].empty();
+    const auto label = L"快捷栏 " + std::to_wstring(slot + 1) + L" · " +
+        menu_text(slot_row_display_label(slot));
+    AppendMenuW(menu, MF_STRING, 901 + slot, label.c_str());  // inert label
+    rows.push_back({menu, 0, {{
+        {static_cast<UINT>(70 + slot), xfx::MenuActionIcon::Bind, selected_row_can_bind(),
+         L"把当前搜索结果绑定到这里"},
+        {static_cast<UINT>(80 + slot), xfx::MenuActionIcon::Clear, occupied, L"清空这一格"}
+    }}});
+    RECT cell{}; GetWindowRect(g_state->slot_row_buttons[static_cast<size_t>(slot)], &cell);
+    const auto command = track_slot_actions(menu, {cell.left, cell.bottom}, g_state->window, rows);
+    DestroyMenu(menu);
+    if (command >= 70 && command <= 78) assign_row_slot(command - 70);
+    else if (command >= 80 && command <= 88) clear_row_slot(command - 80);
 }
 
 void show_shortcut_menu() {
@@ -4362,8 +4448,13 @@ void draw_combo_face(HWND hwnd, HDC dc) {
     const int saved = SaveDC(dc);
     RECT rect{}; GetClientRect(hwnd, &rect);
     const auto& c = colors();
+    // The page background fills the corners so the rounded card's own antialiasing has
+    // something to blend into. Without this the arcs leave a dark square edge.
     FillRect(dc, &rect, g_state->background_brush);
-    xfx::paint_round_rect(dc, rect, c.input, static_cast<float>(ui_px(4)), GetFocus() == hwnd ? c.accent : c.divider);
+    RECT face = rect;
+    InflateRect(&face, -ui_px(1), -ui_px(1));
+    xfx::paint_round_rect(dc, face, c.input, static_cast<float>(ui_px(5)),
+        GetFocus() == hwnd ? c.accent : c.divider);
     SelectObject(dc, g_state->font);
     SetBkMode(dc, TRANSPARENT); SetTextColor(dc, IsWindowEnabled(hwnd) ? c.text : c.disabled);
     const auto selection = SendMessageW(hwnd, CB_GETCURSEL, 0, 0);
@@ -4959,14 +5050,22 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 return TRUE;
             }
             const bool selected = (draw->itemState & ODS_SELECTED) && !(draw->itemState & ODS_COMBOBOXEDIT);
-            HBRUSH brush = CreateSolidBrush(selected ? colors().selected : colors().input);
-            FillRect(draw->hDC, &draw->rcItem, brush); DeleteObject(brush);
+            // Draw the list row as a rounded card, matching every other surface in the
+            // console. A flat FillRect left hard square corners in the open list.
+            RECT item_card = draw->rcItem;
+            InflateRect(&item_card, -ui_px(1), -ui_px(1));
+            HBRUSH frame_brush = CreateSolidBrush(colors().input);
+            FillRect(draw->hDC, &draw->rcItem, frame_brush); DeleteObject(frame_brush);
+            xfx::paint_round_rect(draw->hDC, item_card,
+                selected ? colors().selected : colors().input,
+                static_cast<float>(ui_px(4)),
+                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
             if (draw->itemID != static_cast<UINT>(-1)) {
                 wchar_t label[64]{}; SendMessageW(draw->hwndItem, CB_GETLBTEXT, draw->itemID, reinterpret_cast<LPARAM>(label));
-                RECT text = draw->rcItem; text.left += 4;
+                RECT text = item_card; text.left += ui_px(7); text.right -= ui_px(4);
                 SetBkMode(draw->hDC, TRANSPARENT);
                 SetTextColor(draw->hDC, selected ? colors().selected_text : colors().text);
-                DrawTextW(draw->hDC, label, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(draw->hDC, label, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
             return TRUE;
         }
