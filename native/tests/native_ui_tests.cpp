@@ -567,6 +567,76 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--recent-survives") {
+            // 最近 (recent) is only useful if it survives a restart: the apply path writes
+            // it into settings, and the filter reads it back. Test both halves together.
+            show_console();
+            g_state->settings.recent.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, 0, 0);
+            const auto key = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+
+            // Run the staged apply so the recents list is written the real way.
+            g_pending_applies.clear();
+            g_test_force_modal = false;
+            g_test_scripting_available = true;
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_apply_clear_streak = 0;
+            xfx::ScriptReply ok_reply;
+            ok_reply.succeeded = true;
+            ok_reply.count = 1;
+            ok_reply.message = "ok";
+            g_test_script_reply = ok_reply;
+            execute_item(*reinterpret_cast<const xfx::CatalogItem*>(data));
+            assert(!g_pending_applies.empty());
+            for (int tick = 0; tick < 12; ++tick) { if (run_pending_apply_on_idle()) break; pump_for(20); }
+            assert(g_pending_applies.empty());
+            g_test_script_reply.reset();
+            assert(!g_state->settings.recent.empty());
+            assert(g_state->settings.recent.front() == key);
+
+            // Persist and reload exactly as the next AE session would.
+            xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+            const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+            assert(!reloaded.recent.empty());
+            assert(reloaded.recent.front() == key);
+
+            // The successful apply closed the palette (that is the designed behaviour), so
+            // reopening it also exercises the restart path: settings are re-read from disk
+            // and the catalog is rebuilt.
+            show_console();
+            pump_for(200);
+            assert(IsWindow(g_state->results));
+            assert(g_state->settings.recent.front() == key);
+
+            // The 最近 filter must then list whatever this session's catalog contains.
+            assert(!g_state->catalog.empty());
+            const auto live_key = item_key(g_state->catalog.front());
+            auto with_live_recent = g_state->settings;
+            with_live_recent.recent = {live_key};
+            g_state->settings = with_live_recent;
+            SetWindowTextW(g_state->search, L"");
+            SendMessageW(g_state->filter, CB_SETCURSEL, 4, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kFilterId, CBN_SELCHANGE),
+                reinterpret_cast<LPARAM>(g_state->filter));
+            populate_results();
+            pump_for(180);
+            const int recent_rows = static_cast<int>(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0));
+            std::cout << "  recent rows=" << recent_rows
+                      << " filterSel=" << (int)SendMessageW(g_state->filter, CB_GETCURSEL, 0, 0)
+                      << " catalog=" << g_state->catalog.size()
+                      << " shortcutMode=" << (shortcut_list_mode() ? 1 : 0) << "\n";
+            assert(recent_rows >= 1);
+            std::cout << "PASS a used effect survives in the recent list across a restart\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--hotkey-fallback") {
             // If AE (or another app) already owns the configured combination, the console
             // must still be summonable. Registration failure is reported and the fallback
