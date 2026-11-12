@@ -791,6 +791,25 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--popup-round") {
+            // round_combo_popup clips a dropdown list to rounded corners. The real system
+            // popup cannot be resized safely in this harness, so exercise the same helper
+            // on a window we own.
+            show_console();
+            HWND probe = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"",
+                WS_POPUP | WS_VISIBLE, 0, 0, 160, 120, g_state->window, nullptr, nullptr, nullptr);
+            assert(probe);
+            round_combo_popup(probe);
+            RECT box{};
+            const int type = GetWindowRgnBox(probe, &box);
+            assert(type == COMPLEXREGION || type == SIMPLEREGION);
+            assert(box.right - box.left == 160);
+            assert(box.bottom - box.top == 120);
+            DestroyWindow(probe);
+            std::cout << "PASS the dropdown popup is clipped to a rounded region\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--combo-popup-real") {
             // Structural check on the REAL popup window of every dropdown. The popup is a
             // "ComboLBox" that Windows creates; if it is never themed, subclassed or given
@@ -818,6 +837,8 @@ int wmain(int argc, wchar_t** argv) {
                 assert(GetPropW(popup, L"XFXComboPopupThemed"));
                 assert(SendMessageW(popup, WM_GETFONT, 0, 0) ==
                     reinterpret_cast<LRESULT>(g_state->font));
+                // And the window itself is clipped to a rounded region, like every other
+                // surface in the console.
                 // And it has a real height, not the collapsed sliver that reads as blank.
                 RECT dropped{};
                 SendMessageW(combo, CB_GETDROPPEDCONTROLRECT, 0,

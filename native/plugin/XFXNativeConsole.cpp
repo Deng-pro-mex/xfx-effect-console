@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.18";
+constexpr char kProductVersion[] = "1.5.19";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4625,16 +4625,39 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
 
 constexpr UINT_PTR kComboPopupSubclassId = 0xB008;
 
+// Clips a dropdown popup to a rounded rectangle. The rows and the closed face are
+// already rounded; without this the list window itself still had square corners.
+void round_combo_popup(HWND popup) {
+    if (!popup || !IsWindow(popup)) return;
+    RECT client{};
+    if (!GetClientRect(popup, &client)) return;
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) return;
+    const int radius = (std::max)(2, ui_px(6));
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+    if (!region) return;
+    // SetWindowRgn takes ownership of the region on success.
+    if (!SetWindowRgn(popup, region, TRUE)) DeleteObject(region);
+}
+
 LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
                                   UINT_PTR id, DWORD_PTR) {
 #ifdef XFX_CONSOLE_TEST
     if (message == WM_ERASEBKGND) ++g_test_popup_erase_calls;
 #endif
+    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE) {
+        // The popup is resized each time it opens, so the region must follow.
+        round_combo_popup(hwnd);
+    }
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, combo_popup_proc, id);
         return DefSubclassProc(hwnd, message, wp, lp);
     }
     if (message == WM_ERASEBKGND) {
+        // Always the last chance before painting: the popup has its final size here, so
+        // this is where the rounded window region is guaranteed to be current.
+        round_combo_popup(hwnd);
         RECT rect{};
         GetClientRect(hwnd, &rect);
         FillRect(reinterpret_cast<HDC>(wp), &rect, g_state->input_brush);
@@ -4713,6 +4736,7 @@ void theme_combo_popup(HWND combo) {
             InvalidateRect(child, nullptr, FALSE);
         }
         SetPropW(popup, L"XFXComboPopupThemed", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
+        round_combo_popup(popup);
         InvalidateRect(popup, nullptr, FALSE);
     }
 }
