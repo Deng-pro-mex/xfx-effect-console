@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.5";
+constexpr char kProductVersion[] = "1.5.6";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -3655,6 +3655,9 @@ void assign_row_slot(int slot) {
     if (data == LB_ERR || data == 0) { set_status(L"请先选择一个项目"); return; }
     const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
     if (!item || slot < 0 || slot >= 9) return;
+    // The placeholder row that fills the shortcut strip is not a real item; binding it
+    // would store a key that can never resolve.
+    if (item->item_type == L"empty") { set_status(L"这一行是空位，请先搜索并选中一个效果"); return; }
     auto updated = g_state->settings;
     updated.row_slots[static_cast<size_t>(slot)] = item_key(*item);
     try { xfx::SettingsStore::save(settings_path(), updated); }

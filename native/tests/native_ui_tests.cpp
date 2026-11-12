@@ -325,14 +325,20 @@ int wmain(int argc, wchar_t** argv) {
         std::abort();
     });
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    // Keyed by pid, and Windows reuses pids. A run that crashed left its directory
+    // behind, so the next process with the same pid hit "file exists" while copying the
+    // alias fixture and died before printing anything. Start from a clean directory.
     const auto directory = fs::temp_directory_path() / (L"xfx-ui-test-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code cleanup_error;
+    fs::remove_all(directory, cleanup_error);
     fs::create_directories(directory);
     g_test_settings_path = directory / L"settings.ini";
     SetEnvironmentVariableW(L"XFX_THUMBNAIL_CACHE_DIR", (directory / L"thumbnail-cache").c_str());
     {
         const auto source = fs::path(utf8_to_wide(__FILE__)).parent_path().parent_path().parent_path();
         fs::copy_file(source / "installer" / "XFXNativeConsole.aliases.tsv",
-                      directory / L"XFXNativeConsole.aliases.default.tsv");
+                      directory / L"XFXNativeConsole.aliases.default.tsv",
+                      fs::copy_options::overwrite_existing);
         const auto aliases = load_aliases();
         std::ifstream inventory(source / "native" / "tests" / "data" / "ae-25.4-effects.txt", std::ios::binary);
         assert(inventory.good());
