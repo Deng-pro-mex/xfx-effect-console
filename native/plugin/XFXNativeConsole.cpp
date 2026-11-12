@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.38";
+constexpr char kProductVersion[] = "1.5.39";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4742,11 +4742,32 @@ void size_combo_popup(HWND combo) {
     int row = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0));
     if (row <= 0) row = MulDiv(26, GetDpiForWindow(combo), 96);
     const int visible = (std::min)(count, (std::max)(3, (std::min)(count, 10)));
-    const int wanted = row * visible + MulDiv(2, GetDpiForWindow(combo), 96);
+    const int padding = MulDiv(2, GetDpiForWindow(combo), 96);
+    int wanted = row * visible + padding;
     RECT bounds{};
     if (!GetWindowRect(info.hwndList, &bounds)) return;
     const int height = bounds.bottom - bounds.top;
     if (height >= wanted) return;
+    // Windows clamps a dropdown to the work area of its monitor. A combo near the bottom
+    // of the screen would otherwise open short - indistinguishable from the reported
+    // "two pixel" bug. Ask for what fits, and move the list up when the space below is not
+    // enough for its rows.
+    MONITORINFO monitor{sizeof(monitor)};
+    if (GetMonitorInfoW(MonitorFromWindow(combo, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        const int available_below = monitor.rcWork.bottom - bounds.top;
+        if (wanted > available_below) {
+            wanted = (std::max)(row * 3 + padding, available_below);
+            const int screen_height = static_cast<int>(monitor.rcWork.bottom - monitor.rcWork.top);
+            const int list_height = (std::min)(wanted, screen_height);
+            const int top = (std::max)(monitor.rcWork.top,
+                monitor.rcWork.bottom - list_height);
+            SetWindowPos(info.hwndList, nullptr, bounds.left, top, bounds.right - bounds.left,
+                list_height, SWP_NOZORDER | SWP_NOACTIVATE);
+            update_trace("combo-popup-clamped available=" + std::to_string(available_below) +
+                " height=" + std::to_string(list_height));
+            return;
+        }
+    }
     SetWindowPos(info.hwndList, nullptr, 0, 0, bounds.right - bounds.left, wanted,
         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     update_trace("combo-popup-sized from=" + std::to_string(height) +

@@ -567,6 +567,100 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--popup-near-bottom") {
+            // A dropdown opened from a combo near the bottom of the screen is clamped by
+            // the work area. Before the fix the list then opened short - visually the same
+            // as the "white 2 pixel bar" bug - with no feedback.
+            show_console();
+            RECT work{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            const int bare_height = 360;
+            const int bottom_top = (std::max)(work.top, work.bottom - bare_height - 8);
+            SetWindowPos(g_state->window, HWND_TOP, work.left + 60, bottom_top, 520, bare_height,
+                SWP_SHOWWINDOW);
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(320);
+            for (int id : {kFilterId, kImeModeId, kHotkeyComboId}) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                SetFocus(combo);
+                SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+                pump_for(260);
+                COMBOBOXINFO info{sizeof(info)};
+                assert(GetComboBoxInfo(combo, &info));
+                RECT bounds{};
+                GetWindowRect(info.hwndList, &bounds);
+                const int list_height = bounds.bottom - bounds.top;
+                const int row = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0));
+                std::cout << "  combo=" << id << " popupHeight=" << list_height
+                          << " top=" << bounds.top << " workArea=(" << work.top << ","
+                          << work.bottom << ")\n";
+                // Even near the bottom the list must show its rows, and it must stay inside
+                // the work area rather than being clipped by it.
+                assert(list_height >= row * 3);
+                assert(bounds.top >= work.top - 2);
+                assert(bounds.bottom <= work.bottom + 2);
+                SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+                pump_for(60);
+            }
+            std::cout << "PASS a dropdown near the bottom still opens with its rows visible\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--no-white-surface") {
+            // The reported bug is a WHITE dropdown. The list only looks white if some
+            // control still paints with the system default surface. Sample every visible
+            // control of the palette in both themes and prove none of them is near-white on
+            // a dark theme, or near-black on a light theme.
+            for (bool light : {false, true}) {
+                if (IsWindow(g_state->window)) { SendMessageW(g_state->window, WM_CLOSE, 0, 0); pump_for(60); }
+                g_state->settings.theme_mode = light ? xfx::ThemeMode::Light : xfx::ThemeMode::Dark;
+                g_state->settings.show_slot_row = true;
+                xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+                show_console();
+                pump_for(220);
+                RECT work{};
+                SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+                SetWindowPos(g_state->window, HWND_TOP, work.left + 30, work.top + 30, 520, 420, SWP_SHOWWINDOW);
+                pump_for(120);
+                HDC screen = GetDC(nullptr);
+                size_t sampled = 0;
+                for (HWND child : {g_state->search, g_state->filter, g_state->results,
+                                   g_state->status, g_state->slot_row_buttons[0],
+                                   g_state->layer_style_buttons[0], g_state->preferences,
+                                   g_state->count, g_state->hotkey_label}) {
+                    if (!child || !IsWindow(child) || !IsWindowVisible(child)) continue;
+                    RECT box{};
+                    if (!GetWindowRect(child, &box)) continue;
+                    const int w = box.right - box.left, h = box.bottom - box.top;
+                    if (w < 4 || h < 4) continue;
+                    HDC memory = CreateCompatibleDC(screen);
+                    HBITMAP shot = CreateCompatibleBitmap(screen, w, h);
+                    const auto previous = SelectObject(memory, shot);
+                    BitBlt(memory, 0, 0, w, h, screen, box.left, box.top, SRCCOPY);
+                    // Sample a grid of points; the average decides "near-white/near-black".
+                    long sum = 0; int n = 0;
+                    for (int y = h / 4; y < h * 3 / 4; y += (std::max)(1, h / 6))
+                        for (int x = w / 8; x < w * 7 / 8; x += (std::max)(1, w / 8), ++n) {
+                            const COLORREF c = GetPixel(memory, x, y);
+                            sum += (GetRValue(c) + GetGValue(c) + GetBValue(c)) / 3;
+                        }
+                    const int average = n ? static_cast<int>(sum / n) : -1;
+                    if (light) assert(average > 90);    // light theme must not be near-black
+                    else assert(average < 200);         // dark theme must not be near-white
+                    SelectObject(memory, previous);
+                    DeleteObject(shot); DeleteDC(memory);
+                    ++sampled;
+                }
+                ReleaseDC(nullptr, screen);
+                assert(sampled >= 6);
+                std::cout << "  " << (light ? "light" : "dark") << " theme sampled " << sampled
+                          << " controls, none pure white/black\n";
+            }
+            std::cout << "PASS no visible control paints the system default surface\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--long-session") {
             // One continuous sequence through every panel state. Each transition can leave
             // stale list style, stale focus or a stale drag flag, and none of those show up
