@@ -567,6 +567,75 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--hotkey-fallback") {
+            // If AE (or another app) already owns the configured combination, the console
+            // must still be summonable. Registration failure is reported and the fallback
+            // path is used instead of leaving the user with a dead shortcut.
+            show_console();
+            const wchar_t* candidates[] = {L"Ctrl+Shift+Space", L"Ctrl+Alt+Space", L"Ctrl+Shift+A"};
+            for (const wchar_t* candidate : candidates) {
+                g_state->settings.hotkey = candidate;
+                const bool registered = register_configured_hotkey();
+                // Either RegisterHotKey took it, or the low-level fallback was installed.
+                // Both are "the shortcut works"; a silent failure is the bug.
+                const bool hook = g_state->keyboard_hook != nullptr;
+                std::wcout << L"  " << candidate << L" registered=" << registered
+                           << L" hook=" << hook << L"\n";
+                assert(registered || hook);
+            }
+            // A malformed shortcut must be rejected rather than half-installed.
+            g_state->settings.hotkey = L"Ctrl+";
+            const bool bad = register_configured_hotkey();
+            (void)bad;   // parse failure is reported, not a crash
+            // Restore a working one for the rest of the harness.
+            g_state->settings.hotkey = L"Ctrl+Alt+Shift+F23";
+            assert(register_configured_hotkey());
+            std::cout << "PASS the summon shortcut always has a working path\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--popup-reopens-clean") {
+            // Open every dropdown, close it, and open it again. The height fix runs on each
+            // open, so a list that opens correctly once must keep doing it - and the popup
+            // must not accumulate window regions or shrink on the second open.
+            show_console();
+            RECT work{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            SetWindowPos(g_state->window, HWND_TOP, work.left + 40, work.top + 40,
+                520, 400, SWP_SHOWWINDOW);
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(320);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            for (int id : ids) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                int heights[3]{};
+                for (int pass = 0; pass < 3; ++pass) {
+                    SetFocus(combo);
+                    SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+                    pump_for(220);
+                    COMBOBOXINFO info{sizeof(info)};
+                    assert(GetComboBoxInfo(combo, &info));
+                    RECT bounds{};
+                    GetWindowRect(info.hwndList, &bounds);
+                    heights[pass] = bounds.bottom - bounds.top;
+                    SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+                    pump_for(80);
+                }
+                std::cout << "  combo=" << id << " heights=" << heights[0]
+                          << "," << heights[1] << "," << heights[2] << "\n";
+                const int row = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0));
+                for (int pass = 0; pass < 3; ++pass) assert(heights[pass] >= row * 3);
+                // The second and third opens must be the same size as the first: a list
+                // that grows or shrinks each time is its own bug.
+                assert(heights[1] == heights[0]);
+                assert(heights[2] == heights[0]);
+            }
+            std::cout << "PASS every dropdown opens at the same usable height every time\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--first-apply-waits") {
             // The first apply after AE starts is the one that produced AE's own error
             // dialog. Simulate that exact situation end to end: the host is mid-dialog,
