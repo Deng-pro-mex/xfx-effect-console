@@ -567,6 +567,28 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--no-forced-run") {
+            // The apply queue must never force a script through a modal loop. The old code
+            // ran it anyway after 20 seconds; that call is exactly what AE answers with its
+            // own error dialog, which was the first-use popup.
+            assert(g_pending_applies.empty());
+            stage_apply("return 'x';", L"", false, true);
+            assert(g_pending_applies.size() == 1);
+            // Pretend the host is unreachable and let the clock run past the old valve.
+            g_test_force_modal = true;
+            g_pending_apply_since = GetTickCount64() - 60000;
+            g_first_idle_tick = GetTickCount64() - 60000;
+            const bool ran = run_pending_apply_on_idle();
+            g_test_force_modal.reset();
+            assert(!ran);                       // must still be waiting
+            assert(g_pending_applies.size() == 1);  // and must still hold the request
+            assert(g_test_last_script.empty());     // nothing was executed
+            g_pending_applies.clear();
+            g_pending_apply_since = 0;
+            std::cout << "PASS a queued apply waits out a modal loop instead of forcing it\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--modal-text") {
             // The exact string AE 25.4 zh-CN returns when it refuses a script because its
             // own dialog is up. The detector used to spell this 模态 instead of 模式, so it
@@ -951,6 +973,42 @@ int wmain(int argc, wchar_t** argv) {
                     reinterpret_cast<LRESULT>(g_state->font));
                 // And the window itself is clipped to a rounded region, like every other
                 // surface in the console.
+                // Capture the popup from the SCREEN. PrintWindow on a system popup gives
+                // a blank sliver, and the hand-rendered WM_DRAWITEM path never proved the
+                // real window was painted - which is exactly how the white list survived
+                // several rounds of "verified" fixes.
+                {
+                    RECT screen_rect{};
+                    if (GetWindowRect(popup, &screen_rect)) {
+                        const int w = screen_rect.right - screen_rect.left;
+                        const int h = screen_rect.bottom - screen_rect.top;
+                        if (w > 8 && h > 8) {
+                            HDC screen = GetDC(nullptr);
+                            HDC memory = CreateCompatibleDC(screen);
+                            HBITMAP shot = CreateCompatibleBitmap(screen, w, h);
+                            const auto previous = SelectObject(memory, shot);
+                            BitBlt(memory, 0, 0, w, h, screen, screen_rect.left,
+                                screen_rect.top, SRCCOPY);
+                            size_t white = 0, sampled = 0;
+                            for (int y = 0; y < h; ++y)
+                                for (int x = 0; x < w; ++x, ++sampled)
+                                    if (GetPixel(memory, x, y) == RGB(255, 255, 255)) ++white;
+                            std::cout << "  screen id=" << id << " " << w << "x" << h
+                                      << " whitePct=" << (sampled ? white * 100 / sampled : 0);
+                            assert(white * 100 < sampled * 60);
+                            if (argc > 1) {
+                                const auto destination = fs::path(argv[1]).parent_path() /
+                                    (L"combo-screen-" + std::to_wstring(id) + L".png");
+                                Gdiplus::Bitmap image(shot, nullptr);
+                                CLSID png{0x557cf406, 0x1a04, 0x11d3,
+                                    {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+                                image.Save(destination.c_str(), &png, nullptr);
+                            }
+                            SelectObject(memory, previous);
+                            DeleteObject(shot); DeleteDC(memory); ReleaseDC(nullptr, screen);
+                        }
+                    }
+                }
                 // And it has a real height, not the collapsed sliver that reads as blank.
                 RECT dropped{};
                 SendMessageW(combo, CB_GETDROPPEDCONTROLRECT, 0,

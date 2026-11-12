@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.23";
+constexpr char kProductVersion[] = "1.5.24";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2472,7 +2472,14 @@ void refresh_catalog() {
 //   * a thread-modal dialog belongs to the AE UI thread and disables its owner, or
 //   * AE's main window is disabled while some popup it owns is up.
 // Returns false when AE is genuinely idle, so normal scripting is unaffected.
+#ifdef XFX_CONSOLE_TEST
+std::optional<bool> g_test_force_modal;
+#endif
+
 bool ae_modal_pending() {
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_force_modal) return *g_test_force_modal;
+#endif
     // AE runs every modal dialog on its main UI thread and DISABLES its main window
     // while that loop is active. That disabled state is the one signal the host itself
     // maintains, so it is used as the authority here. AEGP_IsScriptingAvailable is not
@@ -2651,10 +2658,17 @@ bool run_pending_apply_on_idle() {
     if (!host_scripting_available() || ae_modal_pending()) {
         g_apply_clear_streak = 0;
         const ULONGLONG now = GetTickCount64();
-        if (!g_pending_apply_since) { g_pending_apply_since = now; return false; }
-        // Safety valve: if the host never reports readiness, do not strand the request
-        // silently. Run it anyway after a grace period and report whatever happens.
-        if (now - g_pending_apply_since < 20000) return false;
+        if (!g_pending_apply_since) {
+            g_pending_apply_since = now;
+            // Say once, in our own status line, that the work is waiting. This replaces
+            // the old "run it anyway after 20s" valve: running it during a modal loop is
+            // exactly the call AE answers with its own error dialog, which is the popup
+            // the user saw on the first apply after starting AE.
+            set_status(L"AE 正在等待对话框关闭，操作已排队");
+        }
+        // No timeout. A modal loop either ends (and the apply runs) or the request stays
+        // queued; forcing it produces the host dialog, which is worse than waiting.
+        return false;
     }
     // Both signals clear on this idle; require a short streak so a transient "ready"
     // report during modal teardown cannot slip through.
