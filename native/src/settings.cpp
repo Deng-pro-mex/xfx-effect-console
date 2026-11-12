@@ -143,6 +143,8 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
             explicit_theme_mode = true;
         } else if (line.rfind(L"ResultDigitShortcut=", 0) == 0) {
             settings.result_digit_shortcut = line.substr(19) != L"0";
+        } else if (line.rfind(L"DiagnosticLogging=", 0) == 0) {
+            settings.diagnostic_logging = line.substr(18) != L"0";
         } else if (line.rfind(L"FullResolutionScreenshots=", 0) == 0) {
             // Kept as a compatibility record; snapshots are always full resolution.
             settings.full_resolution_screenshots = true;
@@ -187,6 +189,7 @@ void SettingsStore::save(const std::filesystem::path& path, const Settings& sett
     output << L"FixedWindow=" << (settings.fixed_window ? L"1" : L"0") << L"\r\n";
     output << L"AutoClose=" << (settings.auto_close ? L"1" : L"0") << L"\r\n";
     output << L"ResultDigitShortcut=" << (settings.result_digit_shortcut ? L"1" : L"0") << L"\r\n";
+    output << L"DiagnosticLogging=" << (settings.diagnostic_logging ? L"1" : L"0") << L"\r\n";
     output << L"LightTheme=" << (settings.light_theme ? L"1" : L"0") << L"\r\n";
     output << L"ThemeMode=" << (settings.theme_mode == ThemeMode::Follow ? L"follow" :
         settings.theme_mode == ThemeMode::Light ? L"light" : L"dark") << L"\r\n";

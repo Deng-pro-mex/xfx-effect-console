@@ -21,6 +21,10 @@ struct Settings {
     // results on screen. Off by default for users who want digits to type normally;
     // the numeric keypad is always excluded from this shortcut.
     bool result_digit_shortcut = true;
+    // Verbose diagnostic logging. Off by default so normal use writes only a small
+    // error log; the settings page can turn it on when a problem must be reported
+    // from another machine.
+    bool diagnostic_logging = false;
     // Empty retains the existing product Capture directory for upgrades.
     std::wstring capture_directory;
     std::wstring hotkey = L"Ctrl+Space";

@@ -83,6 +83,7 @@ constexpr int kHotkeySaveId = 1007;
 constexpr int kModeId = 1008;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
+constexpr int kDiagnosticLogId = 1043;
 // Read-only version label pinned to the bottom-right corner of the console.
 constexpr int kVersionLabelId = 1042;
 constexpr int kStatusId = 1009;
@@ -113,11 +114,11 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.10";
+constexpr char kProductVersion[] = "1.1.11";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 162;
+constexpr int kSettingsHeight = 192;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -613,6 +614,7 @@ struct PluginState {
     HWND hotkey_save = nullptr;
     HWND mode_checkbox = nullptr;
     HWND result_digit_checkbox = nullptr;
+    HWND diagnostic_checkbox = nullptr;
     HWND version_label = nullptr;
     HWND status = nullptr;
     HWND update_button = nullptr;
@@ -969,6 +971,10 @@ UINT current_hotkey_modifiers() {
 // record a new shortcut, which is why changing the hotkey appeared impossible.
 bool hotkey_capture_active() {
     if (!g_state) return false;
+    // Focus is the primary signal: whatever happens to the property (window recreation,
+    // a lost WM_SETFOCUS), the recording box having focus means every key belongs to it.
+    if (g_state->hotkey_edit && IsWindow(g_state->hotkey_edit) &&
+        GetFocus() == g_state->hotkey_edit) return true;
     // Only active while the shortcut is being recorded. The search box must NOT count:
     // the console has to remain reachable by its own shortcut while the user types.
     return g_state->hotkey_window &&
@@ -1096,7 +1102,8 @@ bool ensure_hotkey_window() {
     return register_configured_hotkey();
 }
 
-void update_trace(const std::string& text);
+
+void update_trace(const std::string& text, bool always = false);
 
 void set_status(const std::wstring& message, bool success = false) {
     if (g_state && g_state->status) {
@@ -1196,6 +1203,8 @@ bool drag_button_is_held() {
 }
 
 void save_hotkey();
+// Re-registers the configured shortcut after recording released it.
+void restore_suspended_hotkey();
 void toggle_console();
 void save_settings();
 bool execute_selected();
@@ -1256,7 +1265,12 @@ bool try_result_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     // The favourites strip owns the digits when the query is empty, and the settings
     // page must keep its digits for text fields.
     if (shortcut_list_mode() || g_state->settings_visible) return false;
-    const int row = static_cast<int>(key - '1');
+    // The digits address the rows the user can SEE, not the absolute head of the
+    // list. Scrolling changes which items the same digits apply, which is what the
+    // numbering drawn on screen promises.
+    const LRESULT top = SendMessageW(g_state->results, LB_GETTOPINDEX, 0, 0);
+    const int offset = top == LB_ERR ? 0 : static_cast<int>(top);
+    const int row = offset + static_cast<int>(key - '1');
     const LRESULT count = SendMessageW(g_state->results, LB_GETCOUNT, 0, 0);
     if (count == LB_ERR || row >= static_cast<int>(count)) {
         // No such result: consume the key anyway so the number never leaks into the
@@ -1400,6 +1414,20 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // global hooks honour this flag so pressing the *current* shortcut (for
         // example Shift+Space) reaches the box instead of firing the console.
         if (message == WM_SETFOCUS) {
+            // Release the currently registered shortcut for the duration of recording.
+            // RegisterHotKey consumes its own combination system-wide, so with it still
+            // active the very keys the user presses (notably Space in Ctrl+Space) never
+            // reach this box and the press looks ignored.
+            if (g_state->hotkey_window) {
+                RemovePropW(g_state->hotkey_window, L"XFXHotkeySuspended");
+                SetPropW(g_state->hotkey_window, L"XFXHotkeySuspended",
+                         reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
+            }
+            g_state->hotkey.unregister();
+            if (g_state->keyboard_hook) {
+                UnhookWindowsHookEx(g_state->keyboard_hook);
+                g_state->keyboard_hook = nullptr;
+            }
             // Immediate feedback the moment the box is clicked, so the user knows the
             // plugin is listening instead of guessing whether the click registered.
             set_status(L"正在录制快捷键：请按下组合键（如 Ctrl+Alt+Space），Esc 取消");
@@ -1409,11 +1437,15 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             // RemoveProp (not a stored zero) keeps GetPropW unambiguous for callers.
             // WM_ENABLE must not clear the flag: the console disables controls while a
             // busy surface is shown, and that is not a focus change.
-            if (message == WM_SETFOCUS)
+            if (message == WM_SETFOCUS) {
                 SetPropW(g_state->hotkey_window, L"XFXHotkeyCapture",
                          reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
-            else
+            } else {
                 RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
+                // Leaving the box without recording something must not leave the
+                // console without a working shortcut.
+                restore_suspended_hotkey();
+            }
         }
         InvalidateRect(hwnd, nullptr, FALSE);
         return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -1422,8 +1454,10 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
         const UINT key = static_cast<UINT>(wparam);
         if (key == VK_ESCAPE) {
-            // Cancel leaves the stored shortcut untouched.
+            // Cancel leaves the stored shortcut untouched, but the registration that was
+            // released for recording must come back.
             SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
+            restore_suspended_hotkey();
             set_status(L"已取消录制，快捷键未修改", true);
             SetFocus(g_state->search);
             return 0;
@@ -2246,14 +2280,33 @@ void show_console(bool visible);
 // exactly when this returns false.
 // Diagnostic log for the intermittent modal-script failure. Written next to the
 // settings file so a real session can be inspected afterwards instead of guessing.
-void update_trace(const std::string& text) {
-    static std::wstring path;
-    if (path.empty()) {
-        try { path = (settings_path().parent_path() / L"apply-trace.log").wstring(); } catch (...) { return; }
+// One log file, always available, so a failure on a machine we cannot inspect still
+// produces something to read. Errors are always written; verbose detail only when the
+// user turns diagnostic logging on in the settings page.
+std::wstring trace_log_path() {
+    try { return (settings_path().parent_path() / L"effect-console.log").wstring(); }
+    catch (...) { return {}; }
+}
+
+void update_trace(const std::string& text, bool always) {
+    if (!always) {
+        if (!g_state || !g_state->settings.diagnostic_logging) return;
     }
+    const std::wstring path = trace_log_path();
+    if (path.empty()) return;
     try {
-        std::ofstream out(fs::path(path), std::ios::app | std::ios::binary);
-        out << "[" << GetTickCount64() << "] " << text << "\n";
+        // Keep the file bounded: a log that grows forever is worse than no log.
+        const auto file = fs::path(path);
+        std::error_code size_error;
+        const auto bytes = fs::exists(file, size_error) ? fs::file_size(file, size_error) : 0;
+        if (!size_error && bytes > 1024 * 1024) fs::remove(file, size_error);
+        std::ofstream out(file, std::ios::app | std::ios::binary);
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        char stamp[32]{};
+        sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d ", now.wYear, now.wMonth, now.wDay,
+                  now.wHour, now.wMinute, now.wSecond);
+        out << stamp << text << "\r\n";
     } catch (...) {}
 }
 
@@ -2451,6 +2504,7 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         // first; that is the only signal that ever fires for this case.
         const bool modal_text = is_modal_script_rejection(script_error) ||
             is_modal_script_rejection(result);
+        if (modal_text) update_trace("modal-rejection: " + script_error.substr(0, 200), true);
         if (modal_text || (error && early_session)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
@@ -3442,6 +3496,13 @@ void save_settings() {
     g_state->settings = std::move(updated);
 }
 
+void restore_suspended_hotkey() {
+    if (!g_state || !g_state->hotkey_window) return;
+    if (!GetPropW(g_state->hotkey_window, L"XFXHotkeySuspended")) return;
+    RemovePropW(g_state->hotkey_window, L"XFXHotkeySuspended");
+    register_configured_hotkey();
+}
+
 void save_hotkey() {
     wchar_t hotkey[128] = {};
     GetWindowTextW(g_state->hotkey_edit, hotkey, 128);
@@ -3459,6 +3520,9 @@ void save_hotkey() {
         return;
     }
     g_state->settings.hotkey = hotkey;
+    // Recording released the previous registration; clear the suspended marker so the
+    // new combination stays registered instead of being treated as still suspended.
+    if (g_state->hotkey_window) RemovePropW(g_state->hotkey_window, L"XFXHotkeySuspended");
     try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
     catch (...) {
         g_state->settings.hotkey = previous;
@@ -3832,7 +3896,9 @@ void layout_controls(HWND hwnd) {
     // and its own row on narrow ones so nothing overlaps.
     const int digit_y = narrow ? 164 : 106;
     setting(g_state->result_digit_checkbox, narrow ? 8 : 200, digit_y, narrow ? inner : inner - 200, 24);
-    const int update_y = narrow ? 196 : 106;
+    const int diagnostic_y = digit_y + 28;
+    setting(g_state->diagnostic_checkbox, 8, diagnostic_y, inner - 8, 24);
+    const int update_y = diagnostic_y + 30;
     const bool update_in_settings = g_state->settings_extent >= update_y + 26;
     const bool update_in_footer = g_state->update_available && !update_in_settings;
     if (update_in_settings) {
@@ -4246,10 +4312,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->result_digit_checkbox, L"BUTTON",
                        L"数字键 1-9 直接应用搜索结果（小键盘除外）",
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kResultDigitId);
-        for (HWND checkbox : {g_state->mode_checkbox, g_state->result_digit_checkbox})
+        create_control(hwnd, &g_state->diagnostic_checkbox, L"BUTTON",
+                       L"记录诊断日志（遇到问题时勾选，便于排查）",
+                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kDiagnosticLogId);
+        for (HWND checkbox : {g_state->mode_checkbox, g_state->result_digit_checkbox,
+                              g_state->diagnostic_checkbox})
             SetWindowTheme(checkbox, L"", L"");
         SetWindowSubclass(g_state->mode_checkbox,checkbox_face_proc,0xB007,0);
         SetWindowSubclass(g_state->result_digit_checkbox,checkbox_face_proc,0xB008,0);
+        SetWindowSubclass(g_state->diagnostic_checkbox,checkbox_face_proc,0xB00A,0);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
                        WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_CENTERIMAGE | SS_ENDELLIPSIS, kStatusId);
@@ -4277,6 +4348,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                      g_state->settings.use_english_mode ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
                      g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_state->diagnostic_checkbox, BM_SETCHECK,
+                 g_state->settings.diagnostic_logging ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_state->diagnostic_checkbox, BM_SETCHECK,
+                     g_state->settings.diagnostic_logging ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
         repaint_theme_windows();
         g_search_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
@@ -4343,7 +4418,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?166:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?196:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -4472,8 +4547,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             // Show the number key that applies this row. Only rows 1-9 are reachable,
             // and only while the digit shortcut is on, so the label never promises a
             // key that would do nothing.
+            // Number relative to the first visible row so the badge always matches the
+            // digit that will apply it, even after the list has been scrolled.
+            const int first_visible = static_cast<int>(
+                SendMessageW(g_state->results, LB_GETTOPINDEX, 0, 0));
+            const int visible_row = static_cast<int>(draw->itemID) -
+                (first_visible == LB_ERR ? 0 : first_visible);
             const int digit_badge = (g_state->settings.result_digit_shortcut && !shortcut_mode &&
-                draw->itemID < 9) ? static_cast<int>(draw->itemID) + 1 : 0;
+                visible_row >= 0 && visible_row < 9) ? visible_row + 1 : 0;
             if (digit_badge > 0) {
                 RECT key_box = draw->rcItem;
                 key_box.left += px(34);
@@ -4612,6 +4693,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             set_status(utf8_to_wide(result.message.c_str()), result.succeeded);
             return 0;
         }
+        if (LOWORD(wparam) == kDiagnosticLogId && HIWORD(wparam) == BN_CLICKED) {
+            g_state->settings.diagnostic_logging =
+                SendMessageW(g_state->diagnostic_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            set_status(g_state->settings.diagnostic_logging
+                ? L"诊断日志已开启：出问题时请把 effect-console.log 发给开发者"
+                : L"诊断日志已关闭", true);
+            return 0;
+        }
         if (LOWORD(wparam) == kResultDigitId && HIWORD(wparam) == BN_CLICKED) {
             g_state->settings.result_digit_shortcut =
                 SendMessageW(g_state->result_digit_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -4645,7 +4734,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 166 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 196 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
