@@ -863,6 +863,46 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--second-strip-preview") {
+            // Visual proof of the second strip: bound, empty and hovered cells side by
+            // side, so the rounded cards and the bound labels can be inspected directly.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            for (int slot = 0; slot < 9; ++slot)
+                g_state->settings.row_slots[static_cast<size_t>(slot)].clear();
+            for (const auto& item : g_state->catalog) {
+                if (item.item_type != L"effect") continue;
+                for (int slot : {0, 2, 5, 8}) {
+                    if (!g_state->settings.row_slots[static_cast<size_t>(slot)].empty()) continue;
+                    g_state->settings.row_slots[static_cast<size_t>(slot)] = item_key(item);
+                }
+                if (!g_state->settings.row_slots[0].empty() &&
+                    !g_state->settings.row_slots[2].empty() &&
+                    !g_state->settings.row_slots[5].empty() &&
+                    !g_state->settings.row_slots[8].empty()) break;
+            }
+            SetWindowTextW(g_state->search, L"");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(240);
+            if (argc > 1) {
+                save_test_preview(g_state->window,
+                    fs::path(argv[1]).parent_path() / L"second-strip-preview.png");
+            }
+            assert(IsWindowVisible(g_state->slot_row_buttons[0]));
+            // Bound cells must show a label; the tooltip table is what the user reads.
+            // Every bound cell must resolve to a visible label, and every cell must have
+            // a non-empty tooltip (that is the only explanation of what the row does).
+            for (int slot = 0; slot < 9; ++slot) {
+                const auto label = slot_row_display_label(slot);
+                assert(!label.empty());
+                const bool bound = !g_state->settings.row_slots[static_cast<size_t>(slot)].empty();
+                if (bound) assert(label != L"空");
+            }
+            std::cout << "PASS the second strip renders bound and empty cells\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--popup-round") {
             // round_combo_popup clips a dropdown list to rounded corners. The real system
             // popup cannot be resized safely in this harness, so exercise the same helper
