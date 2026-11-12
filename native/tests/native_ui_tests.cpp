@@ -567,6 +567,51 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--menu-row-bind") {
+            // The results context menu carries a 第二行快捷栏 submenu whose items are
+            // numbered 70+slot. Those numbers must bind the row slot - not fall through
+            // to the first-strip handler, and not be swallowed as an inert label.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            for (auto& slot : g_state->settings.slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, 0, 0);
+            assert(data && data != LB_ERR);
+            const auto expected_key = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+
+            // Drive the real menu command numbers through the real handler.
+            for (int slot : {0, 4, 8}) {
+                const UINT command = static_cast<UINT>(70 + slot);
+                handle_slot_command(command);
+                // The first-strip handler must not claim these numbers.
+                assert(g_state->settings.slots[static_cast<size_t>(slot)].empty());
+
+                // show_result_menu dispatches 70..78 itself; call the same code path by
+                // feeding the tracked command through the public entry.
+                g_test_popup_command = command;
+                show_result_menu(g_state->results, MAKELPARAM(10, 10));
+                pump_for(80);
+                assert(g_state->settings.row_slots[static_cast<size_t>(slot)] == expected_key);
+            }
+            assert(g_state->settings.slots[0].empty());
+            assert(g_state->settings.slots[4].empty());
+            assert(g_state->settings.slots[8].empty());
+            // Persisted, not merely in memory.
+            const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+            assert(reloaded.row_slots[0] == expected_key);
+            assert(reloaded.row_slots[8] == expected_key);
+            std::cout << "PASS the row-slot menu items bind row slots only\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--strip-toggle") {
             // Turning the strip on is the only way a user reaches it, and the palette must
             // grow by exactly one strip row. Comparing a settings-open height to a closed
