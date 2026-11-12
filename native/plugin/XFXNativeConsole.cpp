@@ -127,7 +127,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.4.5";
+constexpr char kProductVersion[] = "1.5.0";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -706,6 +706,11 @@ struct PluginState {
     bool result_click_redraw_held = false;
     int result_click_row = -1;
     ResultAction result_click_action = ResultAction::None;
+    // Dragging a search result onto the second strip binds it there. Kept separate from
+    // result_click_pending so a drag never turns into an apply.
+    bool result_drag_armed = false;
+    int result_drag_row = -1;
+    int result_drag_target = -1;
     bool initial_background_primed = false;
     bool initial_frame_painted = false;
     unsigned int modal_depth = 0;
@@ -829,6 +834,8 @@ void start_button_ripple(HWND hwnd, POINT point) {
 bool forward_edge_drag(HWND child, UINT message, WPARAM wparam, LPARAM lparam);
 xfx::ScriptReply execute_row_slot(int slot);
 void assign_row_slot(int slot);
+// Binds an explicit list row; drag-and-drop resolves the row before selection changes.
+void assign_row_slot_dragged(int slot, int row);
 
 LRESULT CALLBACK button_hover_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR) {
@@ -1302,15 +1309,43 @@ xfx::BridgeCompletion perform_update(bool check_only = false);
 void clear_result_data();
 bool add_tooltip_for_control(HWND parent, HWND tooltip, HWND control, UINT_PTR id, const wchar_t* text);
 
+// The two shortcut groups (favourites strip and the nth-result keys) share the digit
+// row, so they may never resolve to the same combination. This table is the single
+// source of truth for the dropdown text and for conflict detection.
+struct ShortcutChoice {
+    const wchar_t* label;   // shown in the dropdown
+    const wchar_t* modifier; // "" = no modifier
+};
+inline constexpr std::array<ShortcutChoice, 6> kShortcutChoices{{
+    {L"关闭", L""},
+    {L"不设（直接按 1-9）", L""},
+    {L"Ctrl + 数字", L"Ctrl"},
+    {L"Alt + 数字", L"Alt"},
+    {L"Shift + 数字", L"Shift"},
+    {L"Ctrl + Alt + 数字", L"Ctrl+Alt"},
+}};
+
+// True when both groups are enabled and would answer the same key combination.
+bool shortcut_groups_conflict(const xfx::Settings& settings) {
+    if (!settings.show_slot_row || !settings.result_digit_shortcut) return false;
+    return settings.slot_row_modifier == settings.result_digit_modifier;
+}
+
+// Rewrites the dropdown labels so a combination the other group already owns is marked.
+// The user sees the conflict where the choice is made, not after the fact.
+void refresh_shortcut_choice_labels();
+
 // Parses one configured modifier name ("Ctrl", "Alt", "Shift", "Win", "Ctrl+Alt").
 // Returns 0 when the text is empty, which means "no modifier".
+// Dropdown index for a stored modifier, matching kShortcutChoices exactly:
+// 0 = 关闭, 1 = 不设（无修饰键）, 2 = Ctrl, 3 = Alt, 4 = Shift, 5 = Ctrl+Alt.
 int modifier_combo_index(const std::wstring& text) {
-    if (text.empty()) return 0;
-    if (text == L"Ctrl") return 1;
-    if (text == L"Alt") return 2;
-    if (text == L"Shift") return 3;
-    if (text == L"Ctrl+Alt") return 4;
-    return 0;
+    if (text.empty()) return 1;
+    if (text == L"Ctrl") return 2;
+    if (text == L"Alt") return 3;
+    if (text == L"Shift") return 4;
+    if (text == L"Ctrl+Alt") return 5;
+    return 1;
 }
 
 UINT modifier_from_text(const std::wstring& text) {
@@ -1854,6 +1889,23 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     if (!result_action_click && forward_edge_drag(hwnd, message, wparam, lparam)) return 0;
+    if (message == WM_MOUSEMOVE && g_state->result_drag_armed) {
+        // Dragging a selected result: track the strip cell under the cursor so the user
+        // sees where the drop will land. This runs before the hover logic, which returns.
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ClientToScreen(hwnd, &point);
+        int target = -1;
+        for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+            RECT cell{};
+            if (!GetWindowRect(g_state->slot_row_buttons[index], &cell)) continue;
+            if (PtInRect(&cell, point)) { target = static_cast<int>(index); break; }
+        }
+        if (target != g_state->result_drag_target) {
+            g_state->result_drag_target = target;
+            RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+        return 0;
+    }
     if (message == WM_MOUSEMOVE) {
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tracking);
@@ -1930,6 +1982,9 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             // default click painting.
             SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
             g_state->result_click_redraw_held = true;
+            g_state->result_drag_armed = row >= 0;
+            g_state->result_drag_row = row;
+            g_state->result_drag_target = -1;
             SetFocus(hwnd);
             SetCapture(hwnd);
             return 0;
@@ -1954,6 +2009,20 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     UpdateWindow(hwnd);
                 }
             };
+
+            // A drop on the second strip binds the dragged result there. This is the
+            // documented way to fill the strip, and it must win over the apply path.
+            const int drop_target = g_state->result_drag_target;
+            g_state->result_drag_armed = false;
+            g_state->result_drag_row = -1;
+            g_state->result_drag_target = -1;
+            if (drop_target >= 0) {
+                SendMessageW(hwnd, LB_SETCURSEL, pending_row, 0);
+                assign_row_slot_dragged(drop_target, pending_row);
+                restore_redraw(true);
+                RedrawWindow(g_state->window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+                return 0;
+            }
 
             const LRESULT hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lparam);
             if (HIWORD(hit) || static_cast<int>(LOWORD(hit)) != pending_row) {
@@ -3656,6 +3725,21 @@ bool execute_selected() {
     return execute_item(*item).succeeded;
 }
 
+void assign_row_slot_dragged(int slot, int row) {
+    if (!g_state || slot < 0 || slot >= 9 || row < 0) return;
+    const LRESULT data = SendMessageW(g_state->results, LB_GETITEMDATA, row, 0);
+    if (data == LB_ERR || data == 0) { set_status(L"请先选择要绑定的效果"); return; }
+    const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
+    if (!item || item->item_type == L"empty") { set_status(L"不能把空位绑定到快捷栏"); return; }
+    auto updated = g_state->settings;
+    updated.row_slots[static_cast<size_t>(slot)] = item_key(*item);
+    try { xfx::SettingsStore::save(settings_path(), updated); }
+    catch (...) { set_status(L"快捷栏绑定未能保存，请检查文档目录写入权限"); return; }
+    g_state->settings = std::move(updated);
+    const auto label = item_display_label(*item);
+    set_status(L"已把「" + label + L"」绑定到快捷栏 " + std::to_wstring(slot + 1), true);
+}
+
 xfx::ScriptReply execute_row_slot(int slot) {
     xfx::ScriptReply failure;
     failure.message = wide_to_utf8(L"第二行快捷栏中的项目已失效，请重新绑定");
@@ -4422,6 +4506,9 @@ void draw_combo_face(HWND hwnd, HDC dc) {
 
 LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
     if (forward_edge_drag(hwnd, message, wp, lp)) return 0;
+    // A closed dropdown must not react to the wheel: scrolling the settings page used to
+    // silently change the selected shortcut. The open list keeps its normal scrolling.
+    if (message == WM_MOUSEWHEEL && !SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0)) return TRUE;
     if(message==WM_NCDESTROY) {RemoveWindowSubclass(hwnd,combo_face_proc,id);return DefSubclassProc(hwnd,message,wp,lp);}
     if(message==WM_ERASEBKGND) return TRUE;
     if(message==WM_PAINT || message==WM_PRINTCLIENT) {
@@ -4459,6 +4546,35 @@ LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
     }
     if (message == WM_THEMECHANGED || message == WM_SETFONT) InvalidateRect(hwnd, nullptr, FALSE);
     return DefSubclassProc(hwnd, message, wp, lp);
+}
+
+// Rebuilds both shortcut dropdown labels. A value that would collide with the other
+// group is annotated in place, so the conflict is visible before it is chosen.
+void refresh_shortcut_choice_labels() {
+    if (!g_state || !g_state->slot_row_key || !g_state->result_digit_key) return;
+    const auto fill = [](HWND combo, bool slot_row) {
+        if (!combo) return;
+        const LRESULT previous = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        const bool other_enabled = slot_row ? g_state->settings.result_digit_shortcut
+                                            : g_state->settings.show_slot_row;
+        const auto& other_modifier = slot_row ? g_state->settings.result_digit_modifier
+                                              : g_state->settings.slot_row_modifier;
+        for (size_t index = 0; index < kShortcutChoices.size(); ++index) {
+            std::wstring label = kShortcutChoices[index].label;
+            const std::wstring modifier = kShortcutChoices[index].modifier;
+            // "关闭" never conflicts; the two "no modifier" entries only conflict when the
+            // other group also runs without a modifier.
+            const bool conflicts = index > 0 && other_enabled && modifier == other_modifier;
+            if (conflicts) label += L"（已被另一组使用）";
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        if (previous >= 0) SendMessageW(combo, CB_SETCURSEL, previous, 0);
+    };
+    fill(g_state->slot_row_key, true);
+    fill(g_state->result_digit_key, false);
+    InvalidateRect(g_state->slot_row_key, nullptr, FALSE);
+    InvalidateRect(g_state->result_digit_key, nullptr, FALSE);
 }
 
 void theme_combo_popup(HWND combo) {
@@ -4751,27 +4867,29 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         for (const auto* label : {L"跟随", L"浅色", L"深色"})
             SendMessageW(g_state->light_theme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         SetWindowTheme(g_state->light_theme, L"", L"");
-        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo,
-                          g_state->slot_row_key,g_state->result_digit_key})
-            SetWindowSubclass(combo,combo_face_proc,0xB005,0);
-        for(HWND combo : {g_state->filter,g_state->light_theme,g_state->ime_mode_combo,
-                          g_state->slot_row_key,g_state->result_digit_key}) {
-            SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,GetDpiForWindow(hwnd),96));
-        }
         create_control(hwnd, &g_state->export_log_button, L"BUTTON", L"导出日志",
                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportLogId);
         create_control(hwnd, &g_state->slot_row_key, L"COMBOBOX", L"快捷栏按键",
                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
                        CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kSlotRowKeyId);
-        for (const auto* label : {L"关闭", L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
-                                  L"Shift+数字", L"Ctrl+Alt+数字"})
-            SendMessageW(g_state->slot_row_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        for (const auto& choice : kShortcutChoices)
+            SendMessageW(g_state->slot_row_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.label));
         create_control(hwnd, &g_state->result_digit_key, L"COMBOBOX", L"搜索结果按键",
                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
                        CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kResultDigitKeyId);
-        for (const auto* label : {L"关闭", L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
-                                  L"Shift+数字", L"Ctrl+Alt+数字"})
-            SendMessageW(g_state->result_digit_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        for (const auto& choice : kShortcutChoices)
+            SendMessageW(g_state->result_digit_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.label));
+        // Both shortcut dropdowns are created just above, so they can only be themed and
+        // subclassed here. Doing it earlier silently skipped them and left native light
+        // combo boxes in the middle of the dark settings page.
+        SetWindowTheme(g_state->slot_row_key, L"", L"");
+        SetWindowTheme(g_state->result_digit_key, L"", L"");
+        for (HWND combo : {g_state->filter, g_state->light_theme, g_state->ime_mode_combo,
+                           g_state->slot_row_key, g_state->result_digit_key}) {
+            if (!combo) continue;
+            SetWindowSubclass(combo, combo_face_proc, 0xB005, 0);
+            SendMessageW(combo, CB_SETITEMHEIGHT, 0, MulDiv(26, GetDpiForWindow(hwnd), 96));
+        }
         create_control(hwnd, &g_state->result_digit_hint, L"STATIC",
                        L"数字 1-9 固定，只调整修饰键",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kResultDigitHintId);
@@ -4815,10 +4933,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                      static_cast<int>(g_state->settings.ime_mode), 0);
         SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
                      g_state->settings.show_slot_row
-                         ? modifier_combo_index(g_state->settings.slot_row_modifier) + 1 : 0, 0);
+                         ? modifier_combo_index(g_state->settings.slot_row_modifier) : 0, 0);
         SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
                      g_state->settings.result_digit_shortcut
-                         ? modifier_combo_index(g_state->settings.result_digit_modifier) + 1 : 0, 0);
+                         ? modifier_combo_index(g_state->settings.result_digit_modifier) : 0, 0);
+        // Mark combinations the other group already owns before the page is first shown.
+        refresh_shortcut_choice_labels();
         SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
         repaint_theme_windows();
         g_search_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
@@ -5133,6 +5253,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             const bool hovered = hovered_entry != g_state->button_hovers.end() &&
                 hovered_entry->second.hovered;
             const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            // Highlight the cell under a dragged result so the drop target is obvious.
+            const bool drop_target = g_state->result_drag_target == static_cast<int>(index);
             // The first strip is a list item, so it already fills its cell with the input
             // colour before drawing the card. Do the same here or the 2px padding keeps
             // stale pixels and the rows read differently.
@@ -5142,7 +5264,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             xfx::paint_round_rect(draw->hDC, card,
                 selected ? colors().selected : hovered ? colors().button : colors().surface,
                 static_cast<float>(ui_px(3)),
-                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+                (selected || drop_target) ? std::optional<COLORREF>(colors().accent) : std::nullopt);
             const auto px = [hwnd](int value) { return MulDiv(value, GetDpiForWindow(hwnd), 96); };
             RECT number = card; number.left += px(3); number.right -= px(3);
             number.top += px(1); number.bottom = number.top + px(10);
@@ -5244,35 +5366,47 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         if ((LOWORD(wparam) == kSlotRowKeyId || LOWORD(wparam) == kResultDigitKeyId) &&
             HIWORD(wparam) == CBN_SELCHANGE) {
-            // One dropdown carries both the on/off switch and the modifier, so the
-            // settings page does not need a checkbox plus a combo for the same thing.
+            // One dropdown carries both the on/off switch and the modifier, so the page
+            // does not need a checkbox plus a combo for the same setting. The selection is
+            // read once, then written to both the struct and the control, so a second
+            // notification cannot act on a stale value.
             const bool is_slot_row = LOWORD(wparam) == kSlotRowKeyId;
             const HWND combo = is_slot_row ? g_state->slot_row_key : g_state->result_digit_key;
             const auto choice = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
-            static const wchar_t* kModifierText[] = {L"", L"", L"Ctrl", L"Alt", L"Shift", L"Ctrl+Alt"};
-            if (choice < 0 || choice > 5) return 0;
+            if (choice < 0 || choice > static_cast<int>(kShortcutChoices.size()) - 1) return 0;
 
             auto updated = g_state->settings;
             if (is_slot_row) {
                 updated.show_slot_row = choice != 0;
-                updated.slot_row_modifier = kModifierText[choice];
+                updated.slot_row_modifier = choice ? kShortcutChoices[static_cast<size_t>(choice)].modifier : L"";
             } else {
                 updated.result_digit_shortcut = choice != 0;
-                updated.result_digit_modifier = kModifierText[choice];
+                updated.result_digit_modifier = choice ? kShortcutChoices[static_cast<size_t>(choice)].modifier : L"";
             }
-            // The two groups must not resolve to the same combination, or one of them
-            // can never fire.
-            const bool slot_enabled = updated.show_slot_row;
-            const bool digit_enabled = updated.result_digit_shortcut;
-            if (slot_enabled && digit_enabled &&
-                updated.slot_row_modifier == updated.result_digit_modifier) {
-                set_status(L"两组快捷键不能使用相同按键，请为其中一组换一个组合");
-                SendMessageW(combo, CB_SETCURSEL, 0, 0);
+            // The two groups must never resolve to the same combination, or one of them
+            // silently never fires.
+            if (shortcut_groups_conflict(updated)) {
+                const auto other = is_slot_row ? L"数字键应用" : L"第二行快捷栏";
+                set_status(L"这个组合已被「" + std::wstring(other) +
+                    L"」占用，请换一个；冲突的组合已在下拉框里标注");
+                // Put the control back to what is actually stored. Leaving the rejected
+                // value on display let the next save read it back and apply it anyway,
+                // which is why the setting appeared to change at random.
+                const auto restore = is_slot_row
+                    ? (g_state->settings.show_slot_row
+                        ? modifier_combo_index(g_state->settings.slot_row_modifier) : 0)
+                    : (g_state->settings.result_digit_shortcut
+                        ? modifier_combo_index(g_state->settings.result_digit_modifier) : 0);
+                SendMessageW(combo, CB_SETCURSEL, restore, 0);
+                refresh_shortcut_choice_labels();
+                SendMessageW(combo, CB_SETCURSEL, restore, 0);
+                InvalidateRect(combo, nullptr, FALSE);
                 return 0;
             }
             try { xfx::SettingsStore::save(settings_path(), updated); }
-            catch (...) { set_status(L"快捷键设置未能保存"); return 0; }
+            catch (...) { set_status(L"快捷键设置未能保存，请检查文档目录写入权限"); return 0; }
             g_state->settings = std::move(updated);
+            refresh_shortcut_choice_labels();
             layout_controls(hwnd);
             adjust_console_height();
             InvalidateRect(hwnd, nullptr, FALSE);

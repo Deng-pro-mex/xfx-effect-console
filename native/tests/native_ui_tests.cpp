@@ -498,9 +498,75 @@ int wmain(int argc, wchar_t** argv) {
         else if (check == L"--ime-retry") check_ime_failure_retry();
         else if (check == L"--ime-pending-restore") check_ime_pending_restore();
         else if (check == L"--apply-click") check_result_click_is_deferred();
+        else if (check == L"--shortcuts") {
+            // Dropdown option count, conflict annotation, wheel immunity.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(260);
+            const auto count = SendMessageW(g_state->slot_row_key, CB_GETCOUNT, 0, 0);
+            assert(count == 6);
+            // Selecting Ctrl for the strip must be accepted and persisted.
+            SendMessageW(g_state->slot_row_key, CB_SETCURSEL, 2, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowKeyId, CBN_SELCHANGE), reinterpret_cast<LPARAM>(g_state->slot_row_key));
+            pump();
+            assert(g_state->settings.show_slot_row && g_state->settings.slot_row_modifier == L"Ctrl");
+            // Choosing the same Ctrl for the digit group must be rejected as a conflict.
+            SendMessageW(g_state->result_digit_key, CB_SETCURSEL, 2, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kResultDigitKeyId, CBN_SELCHANGE), reinterpret_cast<LPARAM>(g_state->result_digit_key));
+            pump();
+            // Rejected: the digit group keeps its previous modifier instead of taking Ctrl.
+            assert(g_state->settings.result_digit_modifier.empty());
+            // The conflicting label must be annotated in the other dropdown.
+            wchar_t label[128]{};
+            SendMessageW(g_state->result_digit_key, CB_GETLBTEXT, 2, reinterpret_cast<LPARAM>(label));
+            assert(std::wstring(label).find(L"已被另一组使用") != std::wstring::npos);
+            // A wheel over a closed dropdown must not change the selection.
+            const auto before = SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0);
+            SendMessageW(g_state->slot_row_key, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), 0);
+            assert(SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0) == before);
+            std::cout << "PASS shortcut dropdowns: 6 options, conflict annotated and rejected, wheel inert\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--drag-bind") {
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.row_slots[2].clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            assert(IsWindowVisible(g_state->slot_row_buttons[2]));
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[2], &cell));
+            POINT drop{cell.left + 8, cell.top + 8};
+            ScreenToClient(g_state->results, &drop);
+            SendMessageW(g_state->results, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(drop.x, drop.y));
+            assert(g_state->result_drag_target == 2);
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(drop.x, drop.y));
+            pump();
+            assert(!g_state->settings.row_slots[2].empty());
+            std::cout << "PASS drag from results onto the second strip binds the item\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--settings") {
             // The settings page as the user sees it, at the normal palette width.
             show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            g_state->settings.result_digit_shortcut = true;
+            g_state->settings.result_digit_modifier = L"";
+            SendMessageW(g_state->slot_row_key, CB_SETCURSEL, 3, 0);
+            SendMessageW(g_state->result_digit_key, CB_SETCURSEL, 1, 0);
+            refresh_shortcut_choice_labels();
             SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
             pump_for(260);
             layout_controls(g_state->window);
