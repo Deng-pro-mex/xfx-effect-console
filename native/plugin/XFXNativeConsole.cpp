@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.29";
+constexpr char kProductVersion[] = "1.5.30";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -5670,6 +5670,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         if (LOWORD(wparam) == kDictionaryId) { edit_dictionary(); return 0; }
         if (LOWORD(wparam) == kSlotRowToggleId && HIWORD(wparam) == BN_CLICKED) {
+            // The strip is switched from its combo, not a checkbox. A notification from a
+            // control that does not exist must not silently clear the setting.
+            if (!g_state->slot_row_checkbox || !IsWindow(g_state->slot_row_checkbox)) return 0;
             g_state->settings.show_slot_row =
                 SendMessageW(g_state->slot_row_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             try { xfx::SettingsStore::save(settings_path(), g_state->settings); }

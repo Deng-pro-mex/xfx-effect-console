@@ -567,6 +567,67 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--strip-toggle") {
+            // Turning the strip on is the only way a user reaches it, and the palette must
+            // grow by exactly one strip row. Comparing a settings-open height to a closed
+            // one measures the settings page, not the strip, so both samples are closed.
+            show_console();
+            g_state->settings.show_slot_row = false;
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(200);
+            RECT without{};
+            GetWindowRect(g_state->window, &without);
+            const int height_without_strip = without.bottom - without.top;
+            assert(std::none_of(g_state->slot_row_buttons.begin(), g_state->slot_row_buttons.end(),
+                [](HWND b) { return b && IsWindowVisible(b); }));
+
+            // Turn it on through the combo the settings page actually shows. Index 3 is
+            // "Alt + 数字", the documented default for the second strip.
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(280);
+            const HWND slot_combo = GetDlgItem(g_state->window, kSlotRowKeyId);
+            assert(slot_combo && IsWindowVisible(slot_combo));
+            SendMessageW(slot_combo, CB_SETCURSEL, 3, 0);
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSlotRowKeyId, CBN_SELCHANGE),
+                reinterpret_cast<LPARAM>(slot_combo));
+            pump_for(320);
+            assert(g_state->settings.show_slot_row);
+            assert(g_state->settings.slot_row_modifier == L"Alt");
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(340);
+
+            RECT with_strip{};
+            GetWindowRect(g_state->window, &with_strip);
+            const int height_with_strip = with_strip.bottom - with_strip.top;
+            std::cout << "  height without strip=" << height_without_strip
+                      << " with strip=" << height_with_strip << "\n";
+            assert(height_with_strip > height_without_strip);
+
+            // Every cell must be visible, non-empty on screen, and inside the client area.
+            RECT client{};
+            GetClientRect(g_state->window, &client);
+            for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
+                const HWND button = g_state->slot_row_buttons[index];
+                assert(button && IsWindowVisible(button));
+                RECT cell{};
+                assert(GetWindowRect(button, &cell));
+                assert(cell.right > cell.left && cell.bottom > cell.top);
+                POINT top_left{cell.left, cell.top};
+                ScreenToClient(g_state->window, &top_left);
+                assert(top_left.y >= 0);
+                assert(top_left.y + (cell.bottom - cell.top) <= client.bottom);
+            }
+            // And the choice must be on disk: the combo path saves before repainting.
+            const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+            assert(reloaded.show_slot_row);
+            assert(reloaded.slot_row_modifier == L"Alt");
+            std::cout << "PASS the second strip turns on, fits the window and is saved\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--recent-survives") {
             // 最近 (recent) is only useful if it survives a restart: the apply path writes
             // it into settings, and the filter reads it back. Test both halves together.
