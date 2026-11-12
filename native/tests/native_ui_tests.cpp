@@ -567,6 +567,47 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--closed-dropdown-corners") {
+            // The reported bug is "all the dropdowns are right angles". The open list is
+            // rounded by a window region; the CLOSED face is a native control whose square
+            // window would still show four sharp corners over the rounded card behind it.
+            // Sample the four corners and the middle of the real control.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(300);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            for (int id : ids) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                RECT box{};
+                assert(GetWindowRect(combo, &box));
+                const int w = box.right - box.left, h = box.bottom - box.top;
+                assert(w > 8 && h > 8);
+                HDC screen = GetDC(nullptr);
+                HDC memory = CreateCompatibleDC(screen);
+                HBITMAP shot = CreateCompatibleBitmap(screen, w, h);
+                const auto previous = SelectObject(memory, shot);
+                const bool copied = BitBlt(memory, 0, 0, w, h, screen, box.left, box.top, SRCCOPY) != FALSE;
+                assert(copied);
+                // The card surface is what must show through a cut corner; the control's
+                // own fill is a different colour. Compare the corner against the centre.
+                const COLORREF centre = GetPixel(memory, w / 2, h / 2);
+                const COLORREF corner = GetPixel(memory, 0, 0);
+                std::cout << "  combo=" << id << " centre=" << (int)GetRValue(centre)
+                          << "," << (int)GetGValue(centre) << "," << (int)GetBValue(centre)
+                          << " corner=" << (int)GetRValue(corner)
+                          << "," << (int)GetGValue(corner) << "," << (int)GetBValue(corner) << "\n";
+                // A corner that is painted with the control's own interior colour means the
+                // square window is still visible there.
+                assert(!(corner == centre));
+                SelectObject(memory, previous);
+                DeleteObject(shot); DeleteDC(memory); ReleaseDC(nullptr, screen);
+            }
+            std::cout << "PASS the closed dropdown face does not paint a square corner\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--row-cell-empty-click") {
             // Clicking an EMPTY cell must bind; clicking an OCCUPIED cell must run it.
             // That split is the whole interaction, and getting it backwards makes the
@@ -1508,10 +1549,25 @@ int wmain(int argc, wchar_t** argv) {
                 // At least three rows visible: a 2px sliver is the bug.
                 assert(height >= row * 3);
                 assert(height <= row * count + row);
-                // Rounded clip lives on the same window.
+                // Rounded clip lives on the same window. A plain rectangle region would
+                // also satisfy "no error", so the corner itself has to be checked: the
+                // extreme corner must be OUTSIDE the region while the centre is inside.
                 RECT region_box{};
                 const int region_type = GetWindowRgnBox(info.hwndList, &region_box);
                 assert(region_type != ERROR);
+                {
+                    HRGN copy = CreateRectRgn(0, 0, 1, 1);
+                    assert(copy);
+                    const int copied = GetWindowRgn(info.hwndList, copy);
+                    assert(copied != ERROR);
+                    const int popup_width = bounds.right - bounds.left;
+                    assert(PtInRegion(copy, popup_width / 2, height / 2));  // centre painted
+                    const bool corner_cut = !PtInRegion(copy, 0, 0) && !PtInRegion(copy, 1, 1);
+                    std::cout << "    regionType=" << region_type
+                              << " cornerCut=" << (corner_cut ? 1 : 0) << "\n";
+                    assert(corner_cut);
+                    DeleteObject(copy);
+                }
                 // Sample what the popup actually paints. A blank white list - the reported
                 // bug - shows up here as a mostly-white capture.
                 if (argc > 1 && height > 8) {
