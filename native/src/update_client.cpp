@@ -462,8 +462,11 @@ struct Cache {
         if (GetDriveTypeW(directory.root_path().c_str()) != DRIVE_FIXED) fail("Cache must be on a fixed local drive");
     }
 };
+// expected == 0 means the size is unknown, which happens for releases discovered through
+// github.com (that path has no size metadata). Only the SHA256 is compared then.
 std::string file_hash(HANDLE h, uint64_t expected) {
-    LARGE_INTEGER size{}; win(GetFileSizeEx(h, &size) != FALSE, "Cannot inspect cached installer size"); if (size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) != expected) fail("Cached installer size mismatch");
+    LARGE_INTEGER size{}; win(GetFileSizeEx(h, &size) != FALSE, "Cannot inspect cached installer size"); if (size.QuadPart < 0) fail("Cached installer has an invalid size");
+    if (expected && static_cast<uint64_t>(size.QuadPart) != expected) fail("Cached installer size mismatch");
     Hash hash; std::array<char, 65536> data{};
     for (;;) { DWORD n = 0; win(ReadFile(h, data.data(), static_cast<DWORD>(data.size()), &n, nullptr) != FALSE, "Cannot read cached installer"); if (!n) break; hash.add(data.data(), n); } return hash.finish();
 }

@@ -88,6 +88,8 @@ constexpr int kSlotRowKeyId = 1071;
 constexpr int kSlotRowHintId = 1072;
 constexpr int kResultDigitKeyId = 1073;
 constexpr int kResultDigitHintId = 1074;
+constexpr int kSlotRowCaptionId = 1075;
+constexpr int kResultDigitCaptionId = 1076;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
 constexpr int kDiagnosticLogId = 1043;
@@ -122,10 +124,10 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.3.1";
+constexpr char kProductVersion[] = "1.4.0";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
-constexpr int kSlotRowHeight = 36;
+constexpr int kSlotRowHeight = 48;
 // Room for the results digit-shortcut row added above the update entry.
 constexpr int kSettingsHeight = 236;
 constexpr int kResultHeight = 28;
@@ -618,6 +620,8 @@ struct PluginState {
     RECT search_surface_bounds{};
     std::array<HWND, 9> layer_style_buttons{};
     std::array<HWND, 9> slot_row_buttons{};
+    HWND slot_row_caption = nullptr;
+    HWND result_digit_caption = nullptr;
     HWND slot_row_checkbox = nullptr;
     HWND slot_row_key = nullptr;
     HWND slot_row_hint = nullptr;
@@ -814,9 +818,19 @@ void start_button_ripple(HWND hwnd, POINT point) {
 }
 
 bool forward_edge_drag(HWND child, UINT message, WPARAM wparam, LPARAM lparam);
+xfx::ScriptReply execute_row_slot(int slot);
+void assign_row_slot(int slot);
 
 LRESULT CALLBACK button_hover_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR) {
+    // Right-click on a second-strip button binds the selected search result to it.
+    if (g_state && message == WM_CONTEXTMENU) {
+        for (int index = 0; index < 9; ++index) {
+            if (g_state->slot_row_buttons[static_cast<size_t>(index)] != hwnd) continue;
+            assign_row_slot(index);
+            return 0;
+        }
+    }
     if (g_state) {
         const auto found = g_state->button_hovers.find(hwnd);
         if (found != g_state->button_hovers.end()) {
@@ -1307,9 +1321,6 @@ UINT current_modifiers() {
     if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) modifiers |= MOD_WIN;
     return modifiers;
 }
-
-xfx::ScriptReply execute_row_slot(int slot);
-void assign_row_slot(int slot);
 
 bool try_digit_shortcut(WPARAM key, LPARAM flags, bool in_search) {
     // Runs the favourites strip. The modifier is user configurable so it cannot clash
@@ -2004,10 +2015,16 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             cycle_filter();
             return 0;
         }
-        if (wparam >= '1' && wparam <= '9' && control) {
+        // The digit shortcuts above already honour the configured modifiers and the
+        // active strip. A hardcoded Ctrl+digit branch here used to force the first
+        // strip, which made the second one impossible to bind.
+        if (wparam >= '1' && wparam <= '9' &&
+            (control || shift) && GetAsyncKeyState(VK_MENU) < 0) {
+            // Explicit slot assignment while a result is selected: Shift + digit binds
+            // whichever strip is currently on screen.
             const int slot = static_cast<int>(wparam - '1');
-            if (shift) assign_slot(slot);
-            else execute_slot(slot);
+            if (g_state->settings.show_slot_row) assign_row_slot(slot);
+            else assign_slot(slot);
             return 0;
         }
     }
@@ -3378,30 +3395,33 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             const int width = draw->rcItem.right - draw->rcItem.left;
             const int height = draw->rcItem.bottom - draw->rcItem.top;
             if (width <= 0 || height <= 0) return TRUE;
-            HDC buffer = CreateCompatibleDC(draw->hDC);
-            HBITMAP bitmap = CreateCompatibleBitmap(draw->hDC, width, height);
-            if (buffer && bitmap) {
-                const auto previous_bitmap = SelectObject(buffer, bitmap);
-                const auto previous_font = SelectObject(buffer, g_state->font);
-                DRAWITEMSTRUCT frame = *draw;
-                frame.hDC = buffer;
-                frame.rcItem = {0, 0, width, height};
-                // Same paint path and same font as the style strip above, so the two
-                // rows read as one family instead of two different toolbars.
-                paint_text_button(frame);
-                SetBkMode(buffer, TRANSPARENT);
-                SetTextColor(buffer, (draw->itemState & ODS_DISABLED) ? colors().disabled : colors().text);
-                SelectObject(buffer, g_state->font);
-                RECT text_rect = frame.rcItem;
-                DrawTextW(buffer, label.c_str(), -1, &text_rect,
-                    DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
-                BitBlt(draw->hDC, draw->rcItem.left, draw->rcItem.top, width, height,
-                    buffer, 0, 0, SRCCOPY);
-                SelectObject(buffer, previous_font);
-                SelectObject(buffer, previous_bitmap);
-            }
-            if (bitmap) DeleteObject(bitmap);
-            if (buffer) DeleteDC(buffer);
+            // Draw exactly the card the first strip draws: rounded surface, small number
+            // in the corner, label under it. Anything else makes the two rows look like
+            // they belong to different tools.
+            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            RECT card = draw->rcItem;
+            card.left += ui_px(1); card.right -= ui_px(1);
+            xfx::paint_round_rect(draw->hDC, card,
+                selected ? colors().selected : colors().surface,
+                static_cast<float>(ui_px(3)),
+                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+            RECT number = card;
+            number.left += ui_px(5); number.top += ui_px(3);
+            number.bottom = number.top + ui_px(11);
+            const auto previous_font = SelectObject(draw->hDC,
+                g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+            SetBkMode(draw->hDC, TRANSPARENT);
+            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
+            DrawTextW(draw->hDC, std::to_wstring(index + 1).c_str(), -1, &number,
+                DT_LEFT | DT_SINGLELINE);
+            SelectObject(draw->hDC, g_state->font);
+            RECT label_rect = card;
+            label_rect.left += ui_px(5); label_rect.right -= ui_px(5);
+            label_rect.top += ui_px(13);
+            SetTextColor(draw->hDC, selected ? colors().selected_text
+                : g_state->settings.row_slots[index].empty() ? colors().quiet : colors().text);
+            DrawTextW(draw->hDC, label.c_str(), -1, &label_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             return TRUE;
         }
         if (draw->CtlType == ODT_BUTTON) { paint_text_button(*draw); return TRUE; }
@@ -3785,6 +3805,12 @@ void save_settings() {
     // Diagnostics are always on: a failure on a machine we cannot inspect must leave
     // evidence behind, so there is no user switch for this.
     updated.diagnostic_logging = true;
+    // The two shortcut dropdowns are authoritative; keep the flags in sync so an
+    // imported file cannot enable a group the dropdown shows as off.
+    const auto slot_choice = SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0);
+    if (slot_choice >= 0) updated.show_slot_row = slot_choice != 0;
+    const auto digit_choice = SendMessageW(g_state->result_digit_key, CB_GETCURSEL, 0, 0);
+    if (digit_choice >= 0) updated.result_digit_shortcut = digit_choice != 0;
     try { xfx::SettingsStore::save(settings_path(), updated); }
     catch (...) {
         throw;
@@ -4182,19 +4208,27 @@ void layout_controls(HWND hwnd) {
     place(g_state->capture, toolbar_bounds.buttons[0]);
     place(g_state->slot, toolbar_bounds.buttons[1]);
     place(g_state->preferences, toolbar_bounds.buttons[2]);
-    const int footer = height - 22 - g_state->settings_extent;
+    const int footer = g_state->settings_visible ? 56
+                                                 : height - 22 - g_state->settings_extent;
     const int styles_top = footer - kLayerStyleRowHeight;
     // Optional favourites strip sits directly above the style row.
     const bool favourites_row = g_state->settings.show_slot_row && !g_state->settings_visible;
     const int slot_row_height = favourites_row ? kSlotRowHeight : 0;
     const int slot_row_top = styles_top - slot_row_height;
-    move(g_state->results, margin, 56, inner,
-         (std::max)(kResultHeight, slot_row_top - 56));
+    if (g_state->settings_visible) {
+        // The settings page is its own surface. Leaving the result list visible above it
+        // makes the page look like a leftover panel stacked under a search UI.
+        ShowWindow(g_state->results, SW_HIDE);
+    } else {
+        ShowWindow(g_state->results, SW_SHOWNA);
+        move(g_state->results, margin, 56, inner,
+             (std::max)(kResultHeight, slot_row_top - 56));
+    }
     if (favourites_row) {
         for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
             const int left = margin + static_cast<int>(index) * inner / 9;
             const int right = margin + static_cast<int>(index + 1) * inner / 9;
-            move(g_state->slot_row_buttons[index], left, slot_row_top + 4, right - left - 3, 28);
+            move(g_state->slot_row_buttons[index], left, slot_row_top + 4, right - left - 3, 40);
             ShowWindow(g_state->slot_row_buttons[index], SW_SHOWNA);
             apply_button_region(g_state->slot_row_buttons[index]);
         }
@@ -4221,60 +4255,77 @@ void layout_controls(HWND hwnd) {
         if (should_show != is_visible || !g_state->settings_animation_active)
             ShowWindow(child, should_show ? SW_SHOWNA : SW_HIDE);
     };
-    // Settings use one column grid: every row starts at the same left edge, every
-    // control shares the same height, and the label column is a fixed width so the
-    // inputs line up vertically instead of drifting with their text length.
-    const int row_h = 26;
-    const int gap = 8;
-    const int label_w = narrow ? 0 : 96;
-    const int field_x = narrow ? 8 : 8 + label_w;
-    const int field_w = narrow ? inner : inner - label_w;
-    const int full_w = inner;
-    int row = 6;
-    const auto next_row = [&](int height) { const int y = row; row += height + gap; return y; };
+    // Settings page: one aligned column. Every row shares the same left edge, the
+    // same control height and the same vertical rhythm, and labels sit in a fixed
+    // column so the inputs form a straight vertical line.
+    const int row_h = 28;
+    const int row_gap = 10;
+    const int pad = 12;
+    const int hint_w = narrow ? 0 : 132;
+    const int field_w = inner - pad * 2 - (narrow ? 0 : 118) - (narrow ? 0 : hint_w);
+    const int key_w = narrow ? inner - pad * 2 : 82;
+    int cursor = 8;
+    const auto row_height = [&](int height) {
+        const int y = cursor;
+        cursor += height + row_gap;
+        return y;
+    };
+    const auto section = [&](const wchar_t* title) {
+        const int y = row_height(20);
+        // Section captions are dim and small: they group rows without competing with
+        // the controls the way a full-width heading would.
+        return y;
+    };
 
-    int y = next_row(28);
-    setting(g_state->refresh, 8, y, 80, 28);
-    setting(g_state->dictionary, 92, y, 80, 28);
-    setting(g_state->count, 180, y + 4, inner - 172, 22);
+    int y = row_height(row_h);
+    setting(g_state->refresh, pad, y, 82, row_h);
+    setting(g_state->dictionary, pad + 88, y, 82, row_h);
+    setting(g_state->count, pad + 180, y + 3, (std::max)(0, inner - pad - 180), 22);
 
-    y = next_row(26);
-    setting(g_state->hotkey_label, 8, y, 62, row_h);
-    setting(g_state->hotkey_edit, 74, y, 128, row_h);
-    setting(g_state->hotkey_save, 210, y, 52, row_h);
-    setting(g_state->import_settings, 270, y, 64, row_h);
-    setting(g_state->export_settings, 342, y, 64, row_h);
+    y = row_height(row_h);
+    setting(g_state->hotkey_label, pad, y, 60, row_h);
+    setting(g_state->hotkey_edit, pad + 62, y, 122, row_h);
+    setting(g_state->hotkey_save, pad + 190, y, 54, row_h);
+    setting(g_state->import_settings, pad + 250, y, 62, row_h);
+    setting(g_state->export_settings, pad + 318, y, 62, row_h);
 
-    y = next_row(28);
-    setting(g_state->ime_mode_combo, field_x, y, (std::max)(120, field_w - 136), 28, 24);
-    setting(g_state->light_theme, inner + 8 - 128, y, 128, 28, 24);
+    y = row_height(row_h);
+    setting(g_state->ime_mode_combo, pad, y, narrow ? inner - pad * 2 : inner - pad * 2 - 132, row_h, 24);
+    setting(g_state->light_theme, inner - pad - 124, y, 124, row_h, 24);
 
-    // Two shortcut groups, one aligned row each: [switch/label] [key dropdown] [hint]
-    y = next_row(row_h);
-    setting(g_state->slot_row_checkbox, field_x, y, 150, row_h);
-    setting(g_state->slot_row_key, field_x + 154, y, 108, row_h, 24);
-    setting(g_state->slot_row_hint, field_x + 266, y, (std::max)(0, inner - 266), row_h, 20);
+    // Two shortcut groups. Each row is [caption] [dropdown] [hint], sharing one label
+    // width so the two dropdowns line up exactly.
+    const int cap_w = narrow ? 96 : 108;
+    y = row_height(row_h);
+    setting(g_state->slot_row_caption, pad, y, cap_w, row_h);
+    setting(g_state->slot_row_key, pad + cap_w + 6, y, key_w, row_h, 24);
+    if (!narrow) setting(g_state->slot_row_hint, pad + cap_w + 6 + key_w + 8, y,
+                         (std::max)(0, inner - pad - (cap_w + 6 + key_w + 8)), row_h, 20);
 
-    y = next_row(row_h);
-    setting(g_state->result_digit_checkbox, field_x, y, 150, row_h, 20);
-    setting(g_state->result_digit_key, field_x + 154, y, 108, row_h, 24);
-    setting(g_state->result_digit_hint, field_x + 266, y, (std::max)(0, inner - 266), row_h, 20);
+    y = row_height(row_h);
+    setting(g_state->result_digit_caption, pad, y, cap_w, row_h);
+    setting(g_state->result_digit_key, pad + cap_w + 6, y, key_w, row_h, 24);
+    if (!narrow) setting(g_state->result_digit_hint, pad + cap_w + 6 + key_w + 8, y,
+                         (std::max)(0, inner - pad - (cap_w + 6 + key_w + 8)), row_h, 20);
 
-    y = next_row(row_h);
-    setting(g_state->export_log_button, inner + 8 - 84, y, 84, row_h);
+    y = row_height(row_h);
+    setting(g_state->export_log_button, inner - pad - 88, y, 88, row_h);
 
     const int diagnostic_y = y;
-    const int export_width = 84;
-    const int update_y = diagnostic_y + row_h + gap;
-    const bool update_in_settings = g_state->settings_extent >= update_y + 26;
+    const int export_width = 88;
+    const int update_y = diagnostic_y + row_h + row_gap;
+    // The update button lives in the settings grid when the page is open, and in the
+    // footer only when an update is waiting and the page is closed.
+    const bool update_in_settings = g_state->settings_extent >= update_y + row_h;
     const bool update_in_footer = g_state->update_available && !update_in_settings;
     if (update_in_settings) {
-        setting(g_state->update_button,8,update_y,narrow ? (width-160)/2 : (std::min)(180,width-152),26);
+        setting(g_state->update_button, pad, update_y,
+                narrow ? (inner - pad * 2) : (std::min)(180, inner - pad * 2), row_h);
     } else {
-        move(g_state->update_button,width-132,height-21,124,20);
+        move(g_state->update_button, inner - 132, height - 22, 124, 20);
         ShowWindow(g_state->update_button, update_in_footer ? SW_SHOWNA : SW_HIDE);
     }
-    const int update_width = update_in_footer ? 128 : 0;
+    const int update_width = update_in_footer ? 132 : 0;
     const int version_width = ui_px(46);
     move(g_state->status,8,height-20,inner-update_width-version_width,18);
     move(g_state->version_label,inner+8-version_width,height-20,version_width,18);
@@ -4693,36 +4744,30 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                           g_state->slot_row_key,g_state->result_digit_key}) {
             SendMessageW(combo,CB_SETITEMHEIGHT,0,MulDiv(26,GetDpiForWindow(hwnd),96));
         }
-        create_control(hwnd, &g_state->result_digit_checkbox, L"BUTTON",
-                       L"数字键 1-9 直接应用搜索结果（小键盘除外）",
-                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kResultDigitId);
         create_control(hwnd, &g_state->export_log_button, L"BUTTON", L"导出日志",
                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportLogId);
-        create_control(hwnd, &g_state->slot_row_checkbox, L"BUTTON",
-                       L"显示第二行快捷栏 1-9",
-                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kSlotRowToggleId);
         create_control(hwnd, &g_state->slot_row_key, L"COMBOBOX", L"快捷栏按键",
                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
                        CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kSlotRowKeyId);
-        for (const auto* label : {L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
+        for (const auto* label : {L"关闭", L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
                                   L"Shift+数字", L"Ctrl+Alt+数字"})
             SendMessageW(g_state->slot_row_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         create_control(hwnd, &g_state->result_digit_key, L"COMBOBOX", L"搜索结果按键",
                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
                        CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, kResultDigitKeyId);
-        for (const auto* label : {L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
+        for (const auto* label : {L"关闭", L"不设（直接按 1-9）", L"Ctrl+数字", L"Alt+数字",
                                   L"Shift+数字", L"Ctrl+Alt+数字"})
             SendMessageW(g_state->result_digit_key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         create_control(hwnd, &g_state->result_digit_hint, L"STATIC",
-                       L"数字 1-9 不可更改，只调整前面的按键",
+                       L"数字 1-9 固定，只调整修饰键",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kResultDigitHintId);
+        create_control(hwnd, &g_state->slot_row_caption, L"STATIC", L"第二行快捷栏",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kSlotRowCaptionId);
+        create_control(hwnd, &g_state->result_digit_caption, L"STATIC", L"默认数字键",
+                       WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kResultDigitCaptionId);
         create_control(hwnd, &g_state->slot_row_hint, L"STATIC",
-                       L"应用于下方第二行 9 个快捷栏",
+                       L"快捷键与第三行无关",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kSlotRowHintId);
-        for (HWND checkbox : {g_state->result_digit_checkbox, g_state->slot_row_checkbox})
-            SetWindowTheme(checkbox, L"", L"");
-        SetWindowSubclass(g_state->result_digit_checkbox,checkbox_face_proc,0xB008,0);
-        SetWindowSubclass(g_state->slot_row_checkbox,checkbox_face_proc,0xB00B,0);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
                        WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_CENTERIMAGE | SS_ENDELLIPSIS, kStatusId);
@@ -4748,14 +4793,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetWindowTextW(g_state->hotkey_edit, g_state->settings.hotkey.c_str());
         SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
                      static_cast<int>(g_state->settings.ime_mode), 0);
-        SendMessageW(g_state->slot_row_checkbox, BM_SETCHECK,
-                     g_state->settings.show_slot_row ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
-                     modifier_combo_index(g_state->settings.slot_row_modifier), 0);
+                     g_state->settings.show_slot_row
+                         ? modifier_combo_index(g_state->settings.slot_row_modifier) + 1 : 0, 0);
         SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
-                     modifier_combo_index(g_state->settings.result_digit_modifier), 0);
-        SendMessageW(g_state->result_digit_checkbox, BM_SETCHECK,
-                     g_state->settings.result_digit_shortcut ? BST_CHECKED : BST_UNCHECKED, 0);
+                     g_state->settings.result_digit_shortcut
+                         ? modifier_combo_index(g_state->settings.result_digit_modifier) + 1 : 0, 0);
         SendMessageW(g_state->light_theme, CB_SETCURSEL, static_cast<int>(g_state->settings.theme_mode), 0);
         repaint_theme_windows();
         g_search_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
@@ -5129,37 +5172,41 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         if ((LOWORD(wparam) == kSlotRowKeyId || LOWORD(wparam) == kResultDigitKeyId) &&
             HIWORD(wparam) == CBN_SELCHANGE) {
-            const HWND combo = LOWORD(wparam) == kSlotRowKeyId ? g_state->slot_row_key
-                                                                : g_state->result_digit_key;
+            // One dropdown carries both the on/off switch and the modifier, so the
+            // settings page does not need a checkbox plus a combo for the same thing.
+            const bool is_slot_row = LOWORD(wparam) == kSlotRowKeyId;
+            const HWND combo = is_slot_row ? g_state->slot_row_key : g_state->result_digit_key;
             const auto choice = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
-            static const wchar_t* kModifierText[] = {L"", L"Ctrl", L"Alt", L"Shift", L"Ctrl+Alt"};
-            if (choice < 0 || choice > 4) return 0;
-            auto& target = LOWORD(wparam) == kSlotRowKeyId
-                ? g_state->settings.slot_row_modifier
-                : g_state->settings.result_digit_modifier;
-            target = kModifierText[choice];
-            // The two shortcuts must not be the same, or one of them can never fire.
-            auto& other = LOWORD(wparam) == kSlotRowKeyId
-                ? g_state->settings.result_digit_modifier
-                : g_state->settings.slot_row_modifier;
-            if (target == other) {
-                set_status(L"两组快捷键不能使用相同按键，请换一个组合");
-                // Put the selection back to the stored value.
-                const int restore_index = LOWORD(wparam) == kSlotRowKeyId
-                    ? [&] {
-                        for (int i = 0; i < 5; ++i)
-                            if (std::wstring(kModifierText[i]) == g_state->settings.slot_row_modifier) return i;
-                        return 0; }()
-                    : [&] {
-                        for (int i = 0; i < 5; ++i)
-                            if (std::wstring(kModifierText[i]) == g_state->settings.result_digit_modifier) return i;
-                        return 0; }();
-                SendMessageW(combo, CB_SETCURSEL, restore_index, 0);
+            static const wchar_t* kModifierText[] = {L"", L"", L"Ctrl", L"Alt", L"Shift", L"Ctrl+Alt"};
+            if (choice < 0 || choice > 5) return 0;
+
+            auto updated = g_state->settings;
+            if (is_slot_row) {
+                updated.show_slot_row = choice != 0;
+                updated.slot_row_modifier = kModifierText[choice];
+            } else {
+                updated.result_digit_shortcut = choice != 0;
+                updated.result_digit_modifier = kModifierText[choice];
+            }
+            // The two groups must not resolve to the same combination, or one of them
+            // can never fire.
+            const bool slot_enabled = updated.show_slot_row;
+            const bool digit_enabled = updated.result_digit_shortcut;
+            if (slot_enabled && digit_enabled &&
+                updated.slot_row_modifier == updated.result_digit_modifier) {
+                set_status(L"两组快捷键不能使用相同按键，请为其中一组换一个组合");
+                SendMessageW(combo, CB_SETCURSEL, 0, 0);
                 return 0;
             }
-            try { xfx::SettingsStore::save(settings_path(), g_state->settings); }
+            try { xfx::SettingsStore::save(settings_path(), updated); }
             catch (...) { set_status(L"快捷键设置未能保存"); return 0; }
-            set_status(L"快捷键已更新", true);
+            g_state->settings = std::move(updated);
+            layout_controls(hwnd);
+            adjust_console_height();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            if (is_slot_row && !g_state->settings.show_slot_row)
+                set_status(L"已关闭第二行快捷栏", true);
+            else set_status(L"快捷键设置已保存", true);
             return 0;
         }
         if (LOWORD(wparam) == kImeModeId && HIWORD(wparam) == CBN_SELCHANGE) {
