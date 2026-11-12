@@ -791,6 +791,47 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--combo-popup-real") {
+            // Structural check on the REAL popup window of every dropdown. The popup is a
+            // "ComboLBox" that Windows creates; if it is never themed, subclassed or given
+            // our font, it paints its rows with the system defaults - a white list. Row
+            // appearance itself is covered by --combo-dropdown, which drives WM_DRAWITEM.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(260);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            size_t checked = 0;
+            for (int id : ids) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo);
+                assert(IsWindowVisible(combo));
+                SetFocus(combo);
+                SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+                pump_for(160);
+                assert(SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0));
+                COMBOBOXINFO info{sizeof(info)};
+                assert(GetComboBoxInfo(combo, &info));
+                const HWND popup = info.hwndList;
+                assert(popup);
+                // Ours: themed, subclassed, and carrying the console font.
+                assert(GetPropW(popup, L"XFXComboPopupThemed"));
+                assert(SendMessageW(popup, WM_GETFONT, 0, 0) ==
+                    reinterpret_cast<LRESULT>(g_state->font));
+                // And it has a real height, not the collapsed sliver that reads as blank.
+                RECT dropped{};
+                SendMessageW(combo, CB_GETDROPPEDCONTROLRECT, 0,
+                    reinterpret_cast<LPARAM>(&dropped));
+                assert(dropped.bottom - dropped.top >= 26);
+                SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+                pump_for(60);
+                ++checked;
+            }
+            assert(checked == std::size(ids));
+            std::cout << "PASS every real dropdown popup is themed, fonted and sized\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--combo-dropdown") {
             // Render every item of every ownerdraw dropdown through the REAL WM_DRAWITEM
             // path into one image. This is exactly what the popup list shows, so a blank

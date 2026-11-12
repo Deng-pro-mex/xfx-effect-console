@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.17";
+constexpr char kProductVersion[] = "1.5.18";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -158,6 +158,13 @@ AEGP_PluginID g_plugin_id = 0;
 SPBasicSuite* g_basic = nullptr;
 #ifdef XFX_CONSOLE_TEST
 fs::path g_test_settings_path;
+#ifdef XFX_CONSOLE_TEST
+int g_test_measure_calls = 0;
+int g_test_popup_erase_calls = 0;
+int g_test_last_measure_type = -1;
+int g_test_last_measure_id = -1;
+int g_test_last_measure_height = -1;
+#endif
 std::vector<xfx::CatalogItem> g_test_catalog;
 unsigned int g_test_catalog_scan_count = 0;
 std::optional<xfx::ScriptReply> g_test_script_reply;
@@ -4620,6 +4627,9 @@ constexpr UINT_PTR kComboPopupSubclassId = 0xB008;
 
 LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
                                   UINT_PTR id, DWORD_PTR) {
+#ifdef XFX_CONSOLE_TEST
+    if (message == WM_ERASEBKGND) ++g_test_popup_erase_calls;
+#endif
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, combo_popup_proc, id);
         return DefSubclassProc(hwnd, message, wp, lp);
@@ -4665,27 +4675,44 @@ void refresh_shortcut_choice_labels() {
 
 void theme_combo_popup(HWND combo) {
     if (!combo) return;
-    const DWORD process_id = GetCurrentProcessId();
-    for (HWND popup = FindWindowExW(nullptr, nullptr, L"ComboLBox", nullptr);
-         popup; popup = FindWindowExW(nullptr, popup, L"ComboLBox", nullptr)) {
-        DWORD owner_process = 0;
-        GetWindowThreadProcessId(popup, &owner_process);
-        if (owner_process != process_id) continue;
-        if (GetWindow(popup, GW_OWNER) != combo && GetParent(popup) != combo) continue;
+    // Ask the combobox for its own list window. Scanning top-level windows for a
+    // "ComboLBox" and matching it by owner/parent never matched: the popup's owner is the
+    // combobox's PARENT, not the combobox, so no popup was ever themed or subclassed -
+    // which is exactly the all-white dropdown list that was reported.
+    COMBOBOXINFO info{sizeof(info)};
+    HWND popup = GetComboBoxInfo(combo, &info) ? info.hwndList : nullptr;
+    if (!popup) {
+        const DWORD process_id = GetCurrentProcessId();
+        for (popup = FindWindowExW(nullptr, nullptr, L"ComboLBox", nullptr);
+             popup; popup = FindWindowExW(nullptr, popup, L"ComboLBox", nullptr)) {
+            DWORD owner_process = 0;
+            GetWindowThreadProcessId(popup, &owner_process);
+            if (owner_process != process_id) continue;
+            if (GetWindow(popup, GW_OWNER) != combo && GetParent(popup) != GetParent(combo) &&
+                GetParent(popup) != combo) continue;
+            break;
+        }
+        if (!popup) return;
+    }
+    {
         // Style the popup exactly once. Re-theming on every open threw WM_THEMECHANGED
         // into a list that was already on screen, which is the flicker seen when the
         // dropdown is opened and closed quickly.
-        if (GetPropW(popup, L"XFXComboPopupThemed")) continue;
+        if (GetPropW(popup, L"XFXComboPopupThemed")) return;
+        // The combo popup is a "ComboLBox" window that paints the rows itself; it does not
+        // contain a child ListBox. Treating a missing child as "not ready yet" left the
+        // window unthemed and unsubclassed forever, which is exactly the blank white list.
         SetWindowTheme(popup, L"", L"");
         SetWindowSubclass(popup, combo_popup_proc, kComboPopupSubclassId, 0);
-        const HWND list = FindWindowExW(popup, nullptr, L"ListBox", nullptr);
-        if (list) {
-            SetWindowTheme(list, L"", L"");
-            SetWindowSubclass(list, combo_popup_proc, kComboPopupSubclassId, 0);
-            set_font(list);
-            SetPropW(popup, L"XFXComboPopupThemed", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
-            InvalidateRect(list, nullptr, FALSE);
+        set_font(popup);
+        const HWND child = FindWindowExW(popup, nullptr, L"ListBox", nullptr);
+        if (child) {
+            SetWindowTheme(child, L"", L"");
+            SetWindowSubclass(child, combo_popup_proc, kComboPopupSubclassId, 0);
+            set_font(child);
+            InvalidateRect(child, nullptr, FALSE);
         }
+        SetPropW(popup, L"XFXComboPopupThemed", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
         InvalidateRect(popup, nullptr, FALSE);
     }
 }
@@ -4979,6 +5006,18 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (!combo) continue;
             SetWindowSubclass(combo, combo_face_proc, 0xB005, 0);
             SendMessageW(combo, CB_SETITEMHEIGHT, 0, MulDiv(26, GetDpiForWindow(hwnd), 96));
+            // Always show at least eight rows. The default calculation can collapse the
+            // list to a couple of pixels when the parent is small, which looks exactly
+            // like an empty white dropdown.
+            SendMessageW(combo, CB_SETMINVISIBLE, 8, 0);
+        }
+        // Theme every popup now. Waiting for CBN_DROPDOWN meant a list opened without a
+        // real click (keyboard, automation, the first open after startup) stayed unthemed
+        // and painted its rows white.
+        for (HWND combo : {g_state->filter, g_state->light_theme, g_state->ime_mode_combo,
+                           g_state->slot_row_key, g_state->result_digit_key,
+                           g_state->hotkey_combo}) {
+            theme_combo_popup(combo);
         }
         create_control(hwnd, &g_state->result_digit_hint, L"STATIC",
                        L"数字 1-9 固定，只调整修饰键",
@@ -5153,12 +5192,24 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
     case WM_MEASUREITEM: {
         auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
-        if (measure->CtlID == kResultsId) measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;
-        if (measure->CtlID == kFilterId || measure->CtlID == kLightThemeId ||
-            measure->CtlID == kImeModeId || measure->CtlID == kSlotRowKeyId ||
-            measure->CtlID == kResultDigitKeyId || measure->CtlID == kHotkeyComboId)
-            measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
-        return TRUE;
+#ifdef XFX_CONSOLE_TEST
+        ++g_test_measure_calls;
+        g_test_last_measure_type = static_cast<int>(measure->CtlType);
+        g_test_last_measure_id = static_cast<int>(measure->CtlID);
+        g_test_last_measure_height = static_cast<int>(measure->itemHeight);
+#endif
+        if (measure->CtlType == ODT_LISTBOX && measure->CtlID == kResultsId) {
+            measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;
+            return TRUE;
+        }
+        // Answer by control TYPE, not by an id whitelist. The combo popup asks for its
+        // row height under a request this window does not own by id; claiming it without
+        // filling a height returned 0 and collapsed the whole list to a 2px white sliver.
+        if (measure->CtlType == ODT_COMBOBOX) {
+            measure->itemHeight = MulDiv(26, GetDpiForWindow(hwnd), 96);
+            return TRUE;
+        }
+        return FALSE;
     }
     case WM_DRAWITEM: {
         auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
