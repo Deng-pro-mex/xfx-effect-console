@@ -124,12 +124,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.4.1";
+constexpr char kProductVersion[] = "1.4.2";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
-constexpr int kSlotRowHeight = 48;
+constexpr int kSlotRowHeight = 44;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 282;
+constexpr int kSettingsHeight = 244;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -784,7 +784,10 @@ void refresh_host_theme(bool force = false) {
 }
 LRESULT theme_control_color(UINT message,HDC dc,HWND control=nullptr) {
     const bool search=control==g_state->search;
-    const bool quiet=control==g_state->status && !g_state->status_important;
+    // Notes next to a control are secondary text; the same dim colour the status line
+    // uses keeps the page readable without every row shouting at once.
+    const bool quiet=(control==g_state->status && !g_state->status_important) ||
+        control==g_state->slot_row_hint || control==g_state->result_digit_hint;
     SetTextColor(dc,quiet?colors().quiet:colors().text);
     const bool background=message==WM_CTLCOLORSTATIC || message==WM_CTLCOLORBTN;
     SetBkColor(dc,background?colors().background:search?colors().search:colors().input);
@@ -3398,21 +3401,28 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             // Draw exactly the card the first strip draws: rounded surface, small number
             // in the corner, label under it. Anything else makes the two rows look like
             // they belong to different tools.
+            // The first strip is the result list drawn in shortcut mode. Reusing that
+            // exact painter is the only way the two strips can look identical; a second
+            // implementation always drifts.
             const bool selected = (draw->itemState & ODS_SELECTED) != 0;
-            // Same hover treatment the toolbar buttons use, so the strip feels alive.
             const auto hovered_entry = g_state->button_hovers.find(
                 g_state->slot_row_buttons[index]);
             const bool hovered = hovered_entry != g_state->button_hovers.end() &&
                 hovered_entry->second.hovered;
-            RECT card = draw->rcItem;
-            card.left += ui_px(1); card.right -= ui_px(1);
+            RECT surface = draw->rcItem;
+            Gdiplus::Graphics graphics(draw->hDC);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            RECT card = surface;
+            InflateRect(&card, -ui_px(2), -ui_px(2));
             xfx::paint_round_rect(draw->hDC, card,
                 selected ? colors().selected : hovered ? colors().button : colors().surface,
-                static_cast<float>(ui_px(4)),
+                static_cast<float>(ui_px(3)),
                 selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+            const auto px = [hwnd](int value) { return MulDiv(value, GetDpiForWindow(hwnd), 96); };
             RECT number = card;
-            number.left += ui_px(5); number.top += ui_px(3);
-            number.bottom = number.top + ui_px(11);
+            number.left += px(3); number.top += px(1);
+            number.bottom = number.top + px(10);
             const auto previous_font = SelectObject(draw->hDC,
                 g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
             SetBkMode(draw->hDC, TRANSPARENT);
@@ -3421,8 +3431,8 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
                 DT_LEFT | DT_SINGLELINE);
             SelectObject(draw->hDC, g_state->font);
             RECT label_rect = card;
-            label_rect.left += ui_px(5); label_rect.right -= ui_px(5);
-            label_rect.top += ui_px(13);
+            label_rect.left += px(3); label_rect.right -= px(3);
+            label_rect.top += px(10);
             SetTextColor(draw->hDC, selected ? colors().selected_text
                 : g_state->settings.row_slots[index].empty() ? colors().quiet : colors().text);
             DrawTextW(draw->hDC, label.c_str(), -1, &label_rect,
@@ -4236,7 +4246,7 @@ void layout_controls(HWND hwnd) {
         for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
             const int left = margin + static_cast<int>(index) * inner / 9;
             const int right = margin + static_cast<int>(index + 1) * inner / 9;
-            move(g_state->slot_row_buttons[index], left, slot_row_top + 4, right - left - 3, 40);
+            move(g_state->slot_row_buttons[index], left, slot_row_top + 2, right - left - 3, kShortcutHeight);
             ShowWindow(g_state->slot_row_buttons[index], SW_SHOWNA);
             apply_button_region(g_state->slot_row_buttons[index]);
         }
@@ -4263,62 +4273,58 @@ void layout_controls(HWND hwnd) {
         if (should_show != is_visible || !g_state->settings_animation_active)
             ShowWindow(child, should_show ? SW_SHOWNA : SW_HIDE);
     };
-    // Settings page: one aligned column. Every row shares the same left edge, the
-    // same control height and the same vertical rhythm, and labels sit in a fixed
-    // column so the inputs form a straight vertical line.
+    // Settings page layout. It reuses the panel's own rhythm: a 12px gutter, a single
+    // 28px row height, and one fixed label column so nothing floats out of alignment.
+    // Every row is fully occupied, which is what removes the empty holes.
     const int row_h = 28;
-    const int row_gap = 10;
+    const int row_gap = 8;
     const int pad = 12;
-    const int hint_w = narrow ? 0 : 132;
-    const int field_w = inner - pad * 2 - (narrow ? 0 : 118) - (narrow ? 0 : hint_w);
-    const int key_w = narrow ? inner - pad * 2 : 82;
-    // Extra top inset keeps the page clear of the toolbar instead of starting flush.
-    int cursor = 18;
-    const auto row_height = [&](int height) {
-        const int y = cursor;
+    const int gutter = inner - pad * 2;
+    const int label_w = narrow ? 92 : 112;
+    const int key_w = narrow ? 96 : 104;
+    const int field_x = pad + label_w;
+    const int field_w = (std::max)(80, gutter - label_w - key_w - 8);
+    int cursor = 10;
+    const auto next_row = [&](int height) {
+        const int top = cursor;
         cursor += height + row_gap;
-        return y;
+        return top;
     };
-    const auto section = [&](const wchar_t* title) {
-        const int y = row_height(20);
-        // Section captions are dim and small: they group rows without competing with
-        // the controls the way a full-width heading would.
-        return y;
-    };
+    const auto caption_style = SS_CENTERIMAGE | SS_LEFT;
 
-    int y = row_height(row_h);
-    setting(g_state->refresh, pad, y, 82, row_h);
-    setting(g_state->dictionary, pad + 88, y, 82, row_h);
-    setting(g_state->count, pad + 180, y + 3, (std::max)(0, inner - pad - 180), 22);
+    // Row 1: library actions.
+    int y = next_row(row_h);
+    setting(g_state->refresh, pad, y, 84, row_h);
+    setting(g_state->dictionary, pad + 90, y, 84, row_h);
+    setting(g_state->count, pad + 180, y + 4, (std::max)(0, gutter - 180), 20);
 
-    y = row_height(row_h);
-    setting(g_state->hotkey_label, pad, y, 60, row_h);
-    setting(g_state->hotkey_edit, pad + 62, y, 122, row_h);
-    setting(g_state->hotkey_save, pad + 190, y, 54, row_h);
-    setting(g_state->import_settings, pad + 250, y, 62, row_h);
-    setting(g_state->export_settings, pad + 318, y, 62, row_h);
+    // Row 2: shortcut editor. Field widths sum exactly to the gutter.
+    y = next_row(row_h);
+    setting(g_state->hotkey_label, pad, y, 58, row_h);
+    setting(g_state->hotkey_edit, pad + 62, y, 124, row_h);
+    setting(g_state->hotkey_save, pad + 192, y, 56, row_h);
+    setting(g_state->import_settings, pad + 254, y, 60, row_h);
+    setting(g_state->export_settings, pad + 320, y, 60, row_h);
 
-    y = row_height(row_h);
-    setting(g_state->ime_mode_combo, pad, y, narrow ? inner - pad * 2 : inner - pad * 2 - 132, row_h, 24);
-    setting(g_state->light_theme, inner - pad - 124, y, 124, row_h, 24);
+    // Row 3: input method + theme, the two global appearance choices.
+    y = next_row(row_h);
+    setting(g_state->ime_mode_combo, pad, y, narrow ? gutter : gutter - 140, row_h, 24);
+    setting(g_state->light_theme, pad + gutter - 132, y, 132, row_h, 24);
 
-    // Two shortcut groups. Each row is [caption] [dropdown] [hint], sharing one label
-    // width so the two dropdowns line up exactly.
-    const int cap_w = narrow ? 96 : 108;
-    y = row_height(row_h);
-    setting(g_state->slot_row_caption, pad, y, cap_w, row_h);
-    setting(g_state->slot_row_key, pad + cap_w + 6, y, key_w, row_h, 24);
-    if (!narrow) setting(g_state->slot_row_hint, pad + cap_w + 6 + key_w + 8, y,
-                         (std::max)(0, inner - pad - (cap_w + 6 + key_w + 8)), row_h, 20);
+    // Rows 4-5: the two shortcut groups. Identical geometry, so they read as a pair.
+    y = next_row(row_h);
+    setting(g_state->slot_row_caption, pad, y, label_w, row_h);
+    setting(g_state->slot_row_key, field_x, y, key_w, row_h, 24);
+    if (!narrow) setting(g_state->slot_row_hint, field_x + key_w + 8, y, field_w, row_h);
 
-    y = row_height(row_h);
-    setting(g_state->result_digit_caption, pad, y, cap_w, row_h);
-    setting(g_state->result_digit_key, pad + cap_w + 6, y, key_w, row_h, 24);
-    if (!narrow) setting(g_state->result_digit_hint, pad + cap_w + 6 + key_w + 8, y,
-                         (std::max)(0, inner - pad - (cap_w + 6 + key_w + 8)), row_h, 20);
+    y = next_row(row_h);
+    setting(g_state->result_digit_caption, pad, y, label_w, row_h);
+    setting(g_state->result_digit_key, field_x, y, key_w, row_h, 24);
+    if (!narrow) setting(g_state->result_digit_hint, field_x + key_w + 8, y, field_w, row_h);
 
-    y = row_height(row_h);
-    setting(g_state->export_log_button, inner - pad - 88, y, 88, row_h);
+    // Row 6: diagnostics export, right-aligned with the field column.
+    y = next_row(row_h);
+    setting(g_state->export_log_button, pad + gutter - 92, y, 92, row_h);
 
     const int diagnostic_y = y;
     const int export_width = 88;
@@ -4877,7 +4883,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?344:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?300:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -5261,7 +5267,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 344 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 300 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
@@ -5447,21 +5453,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         FillRect(dc, &paint.rcPaint, g_state->background_brush);
         const int dpi = GetDpiForWindow(hwnd);
         const auto px = [dpi](int value){return MulDiv(value,dpi,96);};
+        // Panel outline. The window uses WS_POPUP with no nonclient frame, so without
+        // this stroke the palette has no edge at all and bleeds into AE's background.
+        {
+            RECT frame = client;
+            frame.right -= 1; frame.bottom -= 1;
+            xfx::paint_round_rect(dc, frame, colors().background,
+                static_cast<float>(px(8)), colors().divider);
+        }
         const RECT search_area = toolbar_layout(hwnd).search_surface;
         xfx::paint_round_rect(dc,search_area,colors().search,static_cast<float>(px(4)),GetFocus()==g_state->search?colors().accent:colors().divider);
-        // Hairlines between the settings groups. They sit in the gaps between rows, so
-        // no control paints over them, and they give the page the same quiet rhythm the
-        // search panel has instead of a wall of stacked controls.
-        if (g_state->settings_visible) {
-            const int pad = px(12);
-            const int separator_y = px(56) + px(28) + px(10);
-            for (int line = 0; line < 2; ++line) {
-                const int y = separator_y + line * (px(28) * 2 + px(10) * 2 + px(14));
-                if (y > client.bottom - px(28)) break;
-                RECT divider{pad, y, client.right - pad, y + 1};
-                FillRect(dc, &divider, g_state->input_brush);
-            }
-        }
         Gdiplus::Graphics graphics(dc);graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.TranslateTransform(static_cast<float>(px(23)),static_cast<float>(px(28)));graphics.ScaleTransform(dpi/96.0f,dpi/96.0f);
         Gdiplus::Pen pen(vector_color(colors().icon),1.5f);pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);
