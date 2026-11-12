@@ -567,6 +567,86 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--shortcut-choice-roundtrip") {
+            // The two shortcut dropdowns store "closed" and "no modifier" as DIFFERENT
+            // selections that both map to an empty modifier string. Reopening the page must
+            // restore exactly what was chosen, or the user sees a value they never picked.
+            // Each group is exercised with the OTHER group turned off, because two groups
+            // both set to "no modifier" is a real conflict the plugin must refuse.
+            show_console();
+            auto open_settings = [&](bool open) {
+                SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+                pump_for(open ? 300 : 200);
+            };
+            auto pick = [&](int id, int index) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                SendMessageW(combo, CB_SETCURSEL, index, 0);
+                SendMessageW(g_state->window, WM_COMMAND, MAKEWPARAM(id, CBN_SELCHANGE),
+                    reinterpret_cast<LPARAM>(combo));
+                pump_for(90);
+                return static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            };
+            // Slot row first, with the digit group off.
+            g_state->settings.result_digit_shortcut = false;
+            g_state->settings.result_digit_modifier.clear();
+            open_settings(true);
+            for (int index = 0; index < 6; ++index) {
+                const int applied = pick(kSlotRowKeyId, index);
+                assert(applied == index);   // the guard must not reject these
+                open_settings(false);
+                open_settings(true);
+                const HWND again = GetDlgItem(g_state->window, kSlotRowKeyId);
+                assert(again);
+                const LRESULT restored = SendMessageW(again, CB_GETCURSEL, 0, 0);
+                std::cout << "  slotRow picked=" << index << " restored=" << restored << "\n";
+                assert(restored == index);
+                if (index == 0) {
+                    assert(!g_state->settings.show_slot_row);
+                    assert(g_state->settings.slot_row_modifier.empty());
+                } else if (index == 1) {
+                    assert(g_state->settings.show_slot_row);
+                    assert(g_state->settings.slot_row_modifier.empty());
+                } else {
+                    assert(g_state->settings.show_slot_row);
+                    assert(g_state->settings.slot_row_modifier ==
+                        std::wstring(kShortcutChoices[static_cast<size_t>(index)].modifier));
+                }
+            }
+            open_settings(false);
+
+            // Then the digit group, with the slot row off.
+            g_state->settings.show_slot_row = false;
+            g_state->settings.slot_row_modifier.clear();
+            open_settings(true);
+            for (int index = 0; index < 6; ++index) {
+                const int applied = pick(kResultDigitKeyId, index);
+                assert(applied == index);
+                open_settings(false);
+                open_settings(true);
+                const HWND again = GetDlgItem(g_state->window, kResultDigitKeyId);
+                assert(again);
+                const LRESULT restored = SendMessageW(again, CB_GETCURSEL, 0, 0);
+                std::cout << "  digit   picked=" << index << " restored=" << restored << "\n";
+                assert(restored == index);
+            }
+            open_settings(false);
+
+            // And two groups with the same modifier must be refused, not silently applied.
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Ctrl";
+            g_state->settings.result_digit_shortcut = true;
+            g_state->settings.result_digit_modifier = L"Ctrl";
+            open_settings(true);
+            pick(kResultDigitKeyId, 4);   // Shift: no conflict
+            assert(g_state->settings.result_digit_modifier == L"Shift");
+            const int refused = pick(kResultDigitKeyId, 2);   // Ctrl: conflicts with slot row
+            assert(refused == 4);                             // put back to the stored value
+            assert(g_state->settings.result_digit_modifier == L"Shift");
+            std::cout << "PASS the shortcut dropdowns restore exactly the choice that was made\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--popup-near-bottom") {
             // A dropdown opened from a combo near the bottom of the screen is clamped by
             // the work area. Before the fix the list then opened short - visually the same
