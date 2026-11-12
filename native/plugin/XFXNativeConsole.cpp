@@ -124,7 +124,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.4.2";
+constexpr char kProductVersion[] = "1.4.3";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -933,6 +933,53 @@ void paint_button_surface(const DRAWITEMSTRUCT& draw, bool primary = false) {
     graphics.ResetClip();
     Gdiplus::Pen border(vector_color((draw.itemState & ODS_FOCUS) ? c.accent : c.divider), (draw.itemState & ODS_FOCUS) ? 2.0f : 1.0f);
     graphics.DrawPath(&border, &clip);
+}
+
+// One painter for both favourite strips. The first strip is the result list drawn in
+// shortcut mode and the second is a row of buttons; giving them separate painters is
+// exactly why they kept looking different. Everything except the number text and the
+// label comes from here.
+void paint_slot_card(HDC dc, HWND reference, const RECT& bounds, const std::wstring& number,
+                     const std::wstring& label, bool selected, bool hovered) {
+    RECT card = bounds;
+    InflateRect(&card, -2, -2);
+    xfx::paint_round_rect(dc, card,
+        selected ? colors().selected : hovered ? colors().button : colors().surface,
+        static_cast<float>(ui_px(3)),
+        selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+    const auto px = [reference](int value) {
+        return MulDiv(value, GetDpiForWindow(reference), 96);
+    };
+    RECT number_rect = card;
+    number_rect.left += px(3);
+    number_rect.right -= px(3);
+    number_rect.top += px(1);
+    number_rect.bottom = number_rect.top + px(10);
+    const auto previous_font = SelectObject(dc,
+        g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, selected ? colors().selected_text : colors().success);
+    DrawTextW(dc, number.c_str(), -1, &number_rect, DT_LEFT | DT_SINGLELINE);
+    SelectObject(dc, previous_font);
+    RECT label_rect = card;
+    label_rect.left += px(3);
+    label_rect.right -= px(3);
+    label_rect.top += px(10);
+    SetTextColor(dc, selected ? colors().selected_text
+        : label.empty() ? colors().quiet : colors().text);
+    DrawTextW(dc, label.c_str(), -1, &label_rect,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+}
+
+// "Ctrl+1" style caption for the number badge: the prefix is whatever the user bound.
+std::wstring slot_number_text(int index, const std::wstring& modifier) {
+    std::wstring text;
+    if (modifier == L"Ctrl") text = L"Ctrl+";
+    else if (modifier == L"Alt") text = L"Alt+";
+    else if (modifier == L"Shift") text = L"Shift+";
+    else if (modifier == L"Ctrl+Alt") text = L"Ctrl+Alt+";
+    text += std::to_wstring(index + 1);
+    return text;
 }
 
 void paint_text_button(const DRAWITEMSTRUCT& draw) {
@@ -3385,12 +3432,12 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
         const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
         if (draw->CtlType == ODT_BUTTON &&
             draw->CtlID >= kSlotRowFirstId && draw->CtlID < kSlotRowFirstId + 9) {
-            // Favourites strip: show the user label, or the bound item name.
+            // Same painter, same geometry, same colours as the first strip. Only the
+            // number caption and the bound item name differ, which is the whole point.
             const size_t index = static_cast<size_t>(draw->CtlID - kSlotRowFirstId);
-            std::wstring label = g_state->settings.slot_button_labels[index];
-            if (label.empty()) {
-                const auto& key = g_state->settings.row_slots[index];
-                label = key.empty() ? std::to_wstring(index + 1) : L"…";
+            std::wstring label;
+            const auto& key = g_state->settings.row_slots[index];
+            if (!key.empty()) {
                 for (const auto& item : g_state->catalog) {
                     if (item_key(item) == key) { label = item_display_label(item); break; }
                 }
@@ -3398,45 +3445,13 @@ LRESULT CALLBACK gallery_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             const int width = draw->rcItem.right - draw->rcItem.left;
             const int height = draw->rcItem.bottom - draw->rcItem.top;
             if (width <= 0 || height <= 0) return TRUE;
-            // Draw exactly the card the first strip draws: rounded surface, small number
-            // in the corner, label under it. Anything else makes the two rows look like
-            // they belong to different tools.
-            // The first strip is the result list drawn in shortcut mode. Reusing that
-            // exact painter is the only way the two strips can look identical; a second
-            // implementation always drifts.
             const bool selected = (draw->itemState & ODS_SELECTED) != 0;
-            const auto hovered_entry = g_state->button_hovers.find(
-                g_state->slot_row_buttons[index]);
+            const auto hovered_entry = g_state->button_hovers.find(g_state->slot_row_buttons[index]);
             const bool hovered = hovered_entry != g_state->button_hovers.end() &&
                 hovered_entry->second.hovered;
-            RECT surface = draw->rcItem;
-            Gdiplus::Graphics graphics(draw->hDC);
-            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-            RECT card = surface;
-            InflateRect(&card, -ui_px(2), -ui_px(2));
-            xfx::paint_round_rect(draw->hDC, card,
-                selected ? colors().selected : hovered ? colors().button : colors().surface,
-                static_cast<float>(ui_px(3)),
-                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
-            const auto px = [hwnd](int value) { return MulDiv(value, GetDpiForWindow(hwnd), 96); };
-            RECT number = card;
-            number.left += px(3); number.top += px(1);
-            number.bottom = number.top + px(10);
-            const auto previous_font = SelectObject(draw->hDC,
-                g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
-            SetBkMode(draw->hDC, TRANSPARENT);
-            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
-            DrawTextW(draw->hDC, std::to_wstring(index + 1).c_str(), -1, &number,
-                DT_LEFT | DT_SINGLELINE);
-            SelectObject(draw->hDC, g_state->font);
-            RECT label_rect = card;
-            label_rect.left += px(3); label_rect.right -= px(3);
-            label_rect.top += px(10);
-            SetTextColor(draw->hDC, selected ? colors().selected_text
-                : g_state->settings.row_slots[index].empty() ? colors().quiet : colors().text);
-            DrawTextW(draw->hDC, label.c_str(), -1, &label_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            paint_slot_card(draw->hDC, draw->hwndItem, draw->rcItem,
+                slot_number_text(static_cast<int>(index), g_state->settings.slot_row_modifier),
+                label, selected, hovered);
             return TRUE;
         }
         if (draw->CtlType == ODT_BUTTON) { paint_text_button(*draw); return TRUE; }
@@ -4965,20 +4980,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             SetBkMode(draw->hDC, TRANSPARENT);
             if (shortcut_list_mode()) {
                 const int slot = static_cast<int>(draw->itemID);
-                RECT card = draw->rcItem; InflateRect(&card, -2, -2);
-                xfx::paint_round_rect(draw->hDC,card,selected?colors().selected:colors().surface,
-                    static_cast<float>(ui_px(3)), selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
-                const auto px=[hwnd](int v){return MulDiv(v,GetDpiForWindow(hwnd),96);};
-                RECT number = card; number.left += px(3); number.top += px(1); number.bottom = number.top + px(10);
-                const auto previous_font = SelectObject(draw->hDC,
-                    g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
-                SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
-                DrawTextW(draw->hDC, std::to_wstring(slot + 1).c_str(), -1, &number, DT_LEFT | DT_SINGLELINE);
-                SelectObject(draw->hDC, previous_font);
-                RECT label = card; label.left += px(3); label.right -= px(3); label.top += px(10);
-                auto name = slot_display_label(slot);
-                SetTextColor(draw->hDC,selected?colors().selected_text:g_state->settings.slots[static_cast<size_t>(slot)].empty()?colors().quiet:colors().text);
-                DrawTextW(draw->hDC, name.c_str(), -1, &label, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                paint_slot_card(draw->hDC, hwnd, draw->rcItem,
+                    slot_number_text(slot, g_state->settings.slot_row_modifier),
+                    slot_display_label(slot), selected, false);
                 return TRUE;
             }
 
