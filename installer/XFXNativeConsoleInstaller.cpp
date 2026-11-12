@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -57,7 +58,16 @@ bool is_after_effects_process_name(const std::wstring& name) {
            _wcsicmp(name.c_str(), L"AfterFXBeta.exe") == 0 || _wcsicmp(name.c_str(), L"AfterFXBeta.com") == 0 ||
            _wcsicmp(name.c_str(), L"AfterFXa.exe") == 0;
 }
+#ifdef XFX_INSTALLER_TEST
+// Test override: the real scan sees any AE on this machine, which made every install case
+// fail for an environment reason instead of testing the installer. The test sets this to
+// simulate "no AE running" while still exercising the guard itself through a real process.
+std::optional<std::vector<DWORD>> g_test_running_ae_override;
+#endif
 std::vector<DWORD> after_effects_process_ids() {
+#ifdef XFX_INSTALLER_TEST
+    if (g_test_running_ae_override) return *g_test_running_ae_override;
+#endif
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("无法检查 AE 是否正在运行，请稍后重试。");
     PROCESSENTRY32W entry = {sizeof(PROCESSENTRY32W)};
@@ -351,7 +361,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         options = parse_options(arguments);
         if (!options.log.empty()) log = fs::absolute(options.log);
         if (options.help) {
-            const wchar_t* help = L"效果控制台 1.5.37 安装 / 卸载工具\n\n--target <AE Support Files 目录>  指定目标\n--uninstall  卸载本插件，保留个人设置与备份\n--silent  不弹提示框\n--list  只列出目标，不修改文件\n--log <文件路径>  指定 UTF-8 日志\n\nAE 正在运行时会停止并提示先保存工程、自行退出后重试。程序不会关闭 AE。\n独立卸载器默认执行卸载。未指定目标时处理全部检测到的有效目录。\n需要管理员权限。退出码：0 成功，1 未完成。";
+            const wchar_t* help = L"效果控制台 1.5.38 安装 / 卸载工具\n\n--target <AE Support Files 目录>  指定目标\n--uninstall  卸载本插件，保留个人设置与备份\n--silent  不弹提示框\n--list  只列出目标，不修改文件\n--log <文件路径>  指定 UTF-8 日志\n\nAE 正在运行时会停止并提示先保存工程、自行退出后重试。程序不会关闭 AE。\n独立卸载器默认执行卸载。未指定目标时处理全部检测到的有效目录。\n需要管理员权限。退出码：0 成功，1 未完成。";
             std::wcout << help << std::endl;
             if (!options.silent) MessageBoxW(nullptr, help, L"效果控制台", MB_OK | MB_ICONINFORMATION);
             return 0;

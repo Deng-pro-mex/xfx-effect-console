@@ -71,6 +71,10 @@ int main() {
                 "running AE must block uninstall without closing it or changing files");
         }
         std::cout << "PASS running AE blocks installation without closing it or changing targets\n";
+        // The suites below create fixture trees; run them with the machine-wide scan
+        // neutralised, otherwise any AE open on this computer fails every case for an
+        // environment reason rather than a logic error. The guard itself was proven above.
+        g_test_running_ae_override = std::vector<DWORD>{};
         const auto fresh = ae_fixture(root, L"fresh");
         install_files({fresh}, payload);
         require(read(fresh / L"Plug-ins/XFXNativeConsole.aex") == "new", "fresh plugin missing");
