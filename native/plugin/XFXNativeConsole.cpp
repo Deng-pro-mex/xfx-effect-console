@@ -84,6 +84,7 @@ constexpr int kModeId = 1008;
 // Results-view digit shortcut switch (applies the Nth visible search result).
 constexpr int kResultDigitId = 1041;
 constexpr int kDiagnosticLogId = 1043;
+constexpr int kExportLogId = 1044;
 // Read-only version label pinned to the bottom-right corner of the console.
 constexpr int kVersionLabelId = 1042;
 constexpr int kStatusId = 1009;
@@ -114,7 +115,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.1.11";
+constexpr char kProductVersion[] = "1.1.12";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 // Room for the results digit-shortcut row added above the update entry.
@@ -615,6 +616,7 @@ struct PluginState {
     HWND mode_checkbox = nullptr;
     HWND result_digit_checkbox = nullptr;
     HWND diagnostic_checkbox = nullptr;
+    HWND export_log_button = nullptr;
     HWND version_label = nullptr;
     HWND status = nullptr;
     HWND update_button = nullptr;
@@ -1104,6 +1106,7 @@ bool ensure_hotkey_window() {
 
 
 void update_trace(const std::string& text, bool always = false);
+void export_diagnostic_log();
 
 void set_status(const std::wstring& message, bool success = false) {
     if (g_state && g_state->status) {
@@ -1205,6 +1208,11 @@ bool drag_button_is_held() {
 void save_hotkey();
 // Re-registers the configured shortcut after recording released it.
 void restore_suspended_hotkey();
+// Modifiers that were pressed during the current recording session. Tapping Ctrl and
+// only then pressing the final key is normal user behaviour, and the live key state is
+// already zero at that point, so the presses are remembered here.
+UINT g_record_modifiers = 0;
+void reset_record_modifiers() { g_record_modifiers = 0; }
 void toggle_console();
 void save_settings();
 bool execute_selected();
@@ -1428,6 +1436,7 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
                 UnhookWindowsHookEx(g_state->keyboard_hook);
                 g_state->keyboard_hook = nullptr;
             }
+            reset_record_modifiers();
             // Immediate feedback the moment the box is clicked, so the user knows the
             // plugin is listening instead of guessing whether the click registered.
             set_status(L"正在录制快捷键：请按下组合键（如 Ctrl+Alt+Space），Esc 取消");
@@ -1442,6 +1451,7 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
                          reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
             } else {
                 RemovePropW(g_state->hotkey_window, L"XFXHotkeyCapture");
+                reset_record_modifiers();
                 // Leaving the box without recording something must not leave the
                 // console without a working shortcut.
                 restore_suspended_hotkey();
@@ -1458,32 +1468,43 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             // released for recording must come back.
             SetWindowTextW(hwnd, g_state->settings.hotkey.c_str());
             restore_suspended_hotkey();
+            reset_record_modifiers();
             set_status(L"已取消录制，快捷键未修改", true);
             SetFocus(g_state->search);
             return 0;
         }
         if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU ||
             key == VK_LWIN || key == VK_RWIN) {
-            // Live feedback while modifiers are held so the press is visible.
+            // Remember the press: the user taps the modifier, reads the prompt, and only
+            // then presses the final key. Reading live key state at that later moment
+            // would see zero modifiers and reject the combination.
+            if (key == VK_CONTROL) g_record_modifiers |= MOD_CONTROL;
+            else if (key == VK_SHIFT) g_record_modifiers |= MOD_SHIFT;
+            else if (key == VK_MENU) g_record_modifiers |= MOD_ALT;
+            else g_record_modifiers |= MOD_WIN;
+            // Live feedback so the press is visibly acknowledged.
             std::wstring held;
-            if (GetKeyState(VK_CONTROL) & 0x8000) held += L"Ctrl+";
-            if (GetKeyState(VK_MENU) & 0x8000) held += L"Alt+";
-            if (GetKeyState(VK_SHIFT) & 0x8000) held += L"Shift+";
-            if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) held += L"Win+";
+            if (g_record_modifiers & MOD_CONTROL) held += L"Ctrl+";
+            if (g_record_modifiers & MOD_ALT) held += L"Alt+";
+            if (g_record_modifiers & MOD_SHIFT) held += L"Shift+";
+            if (g_record_modifiers & MOD_WIN) held += L"Win+";
             set_status(held.empty() ? L"正在录制快捷键：按住修饰键再按一个键"
                                     : L"正在录制：" + held + L"…再按一个键");
             return 0;
         }
 
         xfx::HotkeySpec spec;
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) spec.modifiers |= MOD_CONTROL;
-        if ((GetKeyState(VK_MENU) & 0x8000) != 0) spec.modifiers |= MOD_ALT;
-        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) spec.modifiers |= MOD_SHIFT;
-        if ((GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0) {
-            spec.modifiers |= MOD_WIN;
-        }
+        // Combine the modifiers held right now with the ones tapped earlier in this
+        // session, so a released Ctrl still counts as part of the shortcut.
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) g_record_modifiers |= MOD_CONTROL;
+        if ((GetKeyState(VK_MENU) & 0x8000) != 0) g_record_modifiers |= MOD_ALT;
+        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) g_record_modifiers |= MOD_SHIFT;
+        if ((GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0)
+            g_record_modifiers |= MOD_WIN;
+        spec.modifiers = g_record_modifiers;
+        // A bare key with no modifier would hijack ordinary typing, so it stays refused.
         if (spec.modifiers == 0) {
-            set_status(L"请按住 Ctrl / Alt / Shift / Win 之一再按一个键，例如 Ctrl+Alt+Space");
+            set_status(L"请先按 Ctrl / Alt / Shift / Win 之一（轻按一下即可），再按另一个键");
             return 0;
         }
         spec.virtual_key = key;
@@ -1493,6 +1514,7 @@ LRESULT CALLBACK hotkey_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
         // save_hotkey reports the concrete outcome (registered, or rejected because
         // another program already owns the combination).
         save_hotkey();
+        reset_record_modifiers();
         return 0;
     }
     if (message == WM_CHAR || message == WM_SYSCHAR || message == WM_KEYUP || message == WM_SYSKEYUP) return 0;
@@ -3348,6 +3370,79 @@ void import_settings() {
     apply_imported_settings(xfx::SettingsStore::load(file_name, true));
 }
 
+// Writes a self-contained diagnostic bundle the user can send when something goes
+// wrong on a machine nobody can inspect: the log, the settings, and host details.
+void export_diagnostic_log() {
+    ModalGuard modal;
+    wchar_t file_name[MAX_PATH] = L"effect-console-diagnostics.txt";
+    OPENFILENAMEW dialog = {sizeof(dialog)};
+    dialog.hwndOwner = g_state->window;
+    dialog.lpstrFilter = L"诊断报告 (*.txt)\0*.txt\0所有文件 (*.*)\0*.*\0";
+    dialog.lpstrFile = file_name;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.lpstrDefExt = L"txt";
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY;
+    if (!GetSaveFileNameW(&dialog)) return;
+    try {
+        std::ofstream out(fs::path(file_name), std::ios::binary);
+        out << "\xEF\xBB\xBF";
+        out << "效果控制台 诊断报告\r\n";
+        out << "生成时间: ";
+        SYSTEMTIME now{}; GetLocalTime(&now);
+        char stamp[64]{};
+        sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d", now.wYear, now.wMonth, now.wDay,
+                  now.wHour, now.wMinute, now.wSecond);
+        out << stamp << "\r\n\r\n";
+        out << "== 版本 ==\r\n";
+        out << "插件版本: " << kProductVersion << "\r\n";
+        out << "诊断日志开关: " << (g_state->settings.diagnostic_logging ? "开启" : "关闭") << "\r\n";
+        wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, 32768);
+        out << "宿主程序: " << wide_to_utf8(exe) << "\r\n";
+        out << "\r\n== 系统 ==\r\n";
+        // RtlGetVersion reports the real build even when the app has no manifest entry;
+        // GetVersionEx would report a compatibility-shimmed value.
+        std::string build = "unknown";
+        if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+            using RtlGetVersionFn = LONG (WINAPI*)(PRTL_OSVERSIONINFOW);
+            if (auto fn = reinterpret_cast<RtlGetVersionFn>(
+                    GetProcAddress(ntdll, "RtlGetVersion"))) {
+                RTL_OSVERSIONINFOW version{};
+                version.dwOSVersionInfoSize = sizeof(version);
+                if (fn(&version) == 0) {
+                    build = std::to_string(version.dwMajorVersion) + "." +
+                            std::to_string(version.dwMinorVersion) + "." +
+                            std::to_string(version.dwBuildNumber);
+                }
+            }
+        }
+        out << "Windows: " << build << "\r\n";
+        out << "DPI: " << GetDpiForWindow(g_state->window) << "\r\n";
+        out << "临时目录: " << wide_to_utf8(settings_path().parent_path().wstring()) << "\r\n";
+        out << "\r\n== 设置 ==\r\n";
+        out << "快捷键: " << wide_to_utf8(g_state->settings.hotkey) << "\r\n";
+        out << "数字键应用结果: " << (g_state->settings.result_digit_shortcut ? "开" : "关") << "\r\n";
+        out << "自动切换英文: " << (g_state->settings.use_english_mode ? "开" : "关") << "\r\n";
+        out << "主题: " << static_cast<int>(g_state->settings.theme_mode) << "\r\n";
+        out << "目录项目数: " << g_state->catalog.size() << "\r\n";
+        out << "\r\n== 日志 ==\r\n";
+        // Always include the log, even when verbose logging is off, because the error
+        // lines are exactly what is needed.
+        const std::wstring log = trace_log_path();
+        std::ifstream input(fs::path(log), std::ios::binary);
+        if (input) {
+            std::string line;
+            while (std::getline(input, line)) { out << line << "\r\n"; }
+        } else {
+            out << "（尚无日志记录）\r\n";
+        }
+        if (!out) throw std::runtime_error("write failed");
+    } catch (...) {
+        set_status(L"诊断报告导出失败");
+        return;
+    }
+    set_status(L"诊断报告已导出，可发送给开发者", true);
+}
+
 void export_settings() {
     ModalGuard modal;
     wchar_t file_name[MAX_PATH] = L"XFXNativeConsole.settings.ini";
@@ -3897,7 +3992,9 @@ void layout_controls(HWND hwnd) {
     const int digit_y = narrow ? 164 : 106;
     setting(g_state->result_digit_checkbox, narrow ? 8 : 200, digit_y, narrow ? inner : inner - 200, 24);
     const int diagnostic_y = digit_y + 28;
-    setting(g_state->diagnostic_checkbox, 8, diagnostic_y, inner - 8, 24);
+    const int export_width = 76;
+    setting(g_state->diagnostic_checkbox, 8, diagnostic_y, inner - export_width - 4, 24);
+    setting(g_state->export_log_button, inner - export_width, diagnostic_y, export_width, 24);
     const int update_y = diagnostic_y + 30;
     const bool update_in_settings = g_state->settings_extent >= update_y + 26;
     const bool update_in_footer = g_state->update_available && !update_in_settings;
@@ -3913,7 +4010,8 @@ void layout_controls(HWND hwnd) {
     move(g_state->version_label,inner+8-version_width,height-20,version_width,18);
     for (HWND button : {g_state->capture, g_state->slot, g_state->preferences,
                         g_state->refresh, g_state->dictionary, g_state->hotkey_save,
-                        g_state->import_settings, g_state->export_settings, g_state->update_button})
+                        g_state->import_settings, g_state->export_settings, g_state->update_button,
+                        g_state->export_log_button})
         apply_button_region(button);
     SendMessageW(g_state->results, LB_SETITEMHEIGHT, 0, static_cast<LPARAM>((shortcut_list_mode()?kShortcutHeight:kResultHeight)*scale));
     if(shortcut_list_mode()) SendMessageW(g_state->results,LB_SETCOLUMNWIDTH,static_cast<WPARAM>(inner*scale/9),0);
@@ -4315,6 +4413,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->diagnostic_checkbox, L"BUTTON",
                        L"记录诊断日志（遇到问题时勾选，便于排查）",
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, kDiagnosticLogId);
+        create_control(hwnd, &g_state->export_log_button, L"BUTTON", L"导出日志",
+                       WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kExportLogId);
         for (HWND checkbox : {g_state->mode_checkbox, g_state->result_digit_checkbox,
                               g_state->diagnostic_checkbox})
             SetWindowTheme(checkbox, L"", L"");
@@ -4364,7 +4464,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         layout_controls(hwnd);
         const HWND animated_buttons[] = {g_state->capture, g_state->slot, g_state->preferences,
             g_state->refresh, g_state->dictionary, g_state->hotkey_save,
-            g_state->import_settings, g_state->export_settings};
+            g_state->import_settings, g_state->export_settings, g_state->export_log_button};
         for (HWND button : animated_buttons) {
             if (SetWindowSubclass(button, button_hover_proc, kButtonHoverSubclassId, 0))
                 g_state->button_hovers.emplace(button, ButtonHoverState{});
@@ -4691,6 +4791,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             // line instead of a modal dialog the user has to dismiss.
             const auto result = perform_update();
             set_status(utf8_to_wide(result.message.c_str()), result.succeeded);
+            return 0;
+        }
+        if (LOWORD(wparam) == kExportLogId && HIWORD(wparam) == BN_CLICKED) {
+            export_diagnostic_log();
             return 0;
         }
         if (LOWORD(wparam) == kDiagnosticLogId && HIWORD(wparam) == BN_CLICKED) {
