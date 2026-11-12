@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.8";
+constexpr char kProductVersion[] = "1.5.9";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -5115,7 +5115,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
             SetBkMode(draw->hDC, TRANSPARENT);
             if (shortcut_list_mode()) {
+                // The shortcut strip always has nine rows, but itemID is a UINT from the
+                // host and is not guaranteed to stay inside it.
                 const int slot = static_cast<int>(draw->itemID);
+                if (slot < 0 || slot >= 9) return TRUE;
                 RECT card = draw->rcItem; InflateRect(&card, -2, -2);
                 xfx::paint_round_rect(draw->hDC,card,selected?colors().selected:colors().surface,
                     static_cast<float>(ui_px(3)), selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
