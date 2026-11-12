@@ -620,6 +620,61 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--combo-dropdown") {
+            // Render every item of every ownerdraw dropdown through the REAL WM_DRAWITEM
+            // path into one image. This is exactly what the popup list shows, so a blank
+            // white list is visible in the artifact rather than inferred.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(260);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            const int rowHeight = 26;
+            int totalRows = 0;
+            for (int id : ids) totalRows += static_cast<int>(SendMessageW(GetDlgItem(g_state->window, id), CB_GETCOUNT, 0, 0));
+            const int width = 320;
+            const int height = totalRows * rowHeight + 8;
+            HDC screen = GetDC(g_state->window);
+            HDC memory = CreateCompatibleDC(screen);
+            HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+            const auto previous = SelectObject(memory, bitmap);
+            RECT all{0, 0, width, height};
+            FillRect(memory, &all, g_state->background_brush);
+            int y = 0;
+            for (int id : ids) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                const LRESULT count = SendMessageW(combo, CB_GETCOUNT, 0, 0);
+                for (LRESULT item = 0; item < count; ++item) {
+                    RECT row{0, y, width, y + rowHeight};
+                    DRAWITEMSTRUCT draw{};
+                    draw.CtlType = ODT_COMBOBOX;
+                    draw.CtlID = static_cast<UINT>(id);
+                    draw.hwndItem = combo;
+                    draw.hDC = memory;
+                    draw.itemID = static_cast<UINT>(item);
+                    draw.rcItem = row;
+                    SendMessageW(g_state->window, WM_DRAWITEM, id, reinterpret_cast<LPARAM>(&draw));
+                    y += rowHeight;
+                }
+            }
+            if (argc > 1) {
+                // Write the rendered strip as a PNG via the shared encoder.
+                const auto target = fs::path(argv[1]).parent_path() / L"dropdown-items.png";
+                Gdiplus::Bitmap image(bitmap, nullptr);
+                CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+                image.Save(target.c_str(), &png, nullptr);
+                int white = 0;
+                for (int row = 0; row < height; ++row)
+                    for (int column = 0; column < width; column += 4)
+                        if (GetPixel(memory, column, row) == RGB(255, 255, 255)) ++white;
+                assert(white < width * height / 20);
+            }
+            SelectObject(memory, previous);
+            DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(g_state->window, screen);
+            std::cout << "PASS every dropdown list item renders with the panel theme\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--settings") {
             // The settings page as the user sees it, at the normal palette width.
             show_console();

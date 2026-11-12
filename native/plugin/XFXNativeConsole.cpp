@@ -104,8 +104,10 @@ constexpr int kTitleId = 1011;
 constexpr int kSubtitleId = 1012;
 constexpr int kHotkeyLabelId = 1013;
 // Summon shortcut is chosen from a fixed list instead of being typed into a hidden
-// capture control. See kHotkeyChoices.
-constexpr int kHotkeyComboId = 1101;
+// capture control. See kHotkeyChoices. The id is outside the layer-style range
+// (kLayerStyleFirstId..+8); reusing one of those made GetDlgItem resolve to a style
+// button and the dropdown rendered as a blank panel.
+constexpr int kHotkeyComboId = 1090;
 constexpr int kFavoriteId = 1014;
 constexpr int kSlotId = 1015;
 constexpr int kImportId = 1016;
@@ -129,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.1";
+constexpr char kProductVersion[] = "1.5.2";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4940,7 +4942,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (measure->CtlID == kResultsId) measure->itemHeight = shortcut_list_mode() ? kShortcutHeight : kResultHeight;
         if (measure->CtlID == kFilterId || measure->CtlID == kLightThemeId ||
             measure->CtlID == kImeModeId || measure->CtlID == kSlotRowKeyId ||
-            measure->CtlID == kResultDigitKeyId)
+            measure->CtlID == kResultDigitKeyId || measure->CtlID == kHotkeyComboId)
             measure->itemHeight = MulDiv(26,GetDpiForWindow(hwnd),96);
         return TRUE;
     }
@@ -4950,7 +4952,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SelectObject(draw->hDC,g_state->font);
         if (draw->CtlID == kFilterId || draw->CtlID == kLightThemeId ||
             draw->CtlID == kImeModeId || draw->CtlID == kSlotRowKeyId ||
-            draw->CtlID == kResultDigitKeyId) {
+            draw->CtlID == kResultDigitKeyId || draw->CtlID == kHotkeyComboId) {
             if (draw->itemState & ODS_COMBOBOXEDIT) {
                 IntersectClipRect(draw->hDC, draw->rcItem.left, draw->rcItem.top, draw->rcItem.right, draw->rcItem.bottom);
                 draw_combo_face(draw->hwndItem, draw->hDC);
