@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.15";
+constexpr char kProductVersion[] = "1.5.16";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1756,10 +1756,16 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     }
     if (message == WM_TIMER && wparam == kResultDragTimerId) {
         if (!g_state->result_drag_armed) { KillTimer(hwnd, kResultDragTimerId); return 0; }
+        // Sample the real cursor before deciding anything: the release can arrive before
+        // any WM_MOUSEMOVE has been delivered, and the target must be known by then.
+        update_result_drag_target();
         if (!drag_button_is_held()) {
             // The button came up without the list seeing WM_LBUTTONUP (the release went to
-            // another window). Finish the drop here instead of losing the drag.
+            // another window). Finish the drop here instead of losing the drag. When the
+            // pointer never reached a cell this is an ordinary click, so leave the click
+            // state untouched for WM_LBUTTONUP to handle.
             KillTimer(hwnd, kResultDragTimerId);
+            if (g_state->result_drag_target < 0) return 0;
             update_result_drag_target();
             const int drop_target = g_state->result_drag_target;
             const int drag_row = g_state->result_drag_row;
@@ -1861,6 +1867,9 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_state->result_drag_row = row;
             g_state->result_drag_target = -1;
             update_trace("drag-arm row=" + std::to_string(row));
+            // Poll from the first moment. Waiting for a WM_MOUSEMOVE is what lost the
+            // drop whenever the pointer left the list without generating one.
+            SetTimer(hwnd, kResultDragTimerId, 30, nullptr);
             SetFocus(hwnd);
             SetCapture(hwnd);
             return 0;

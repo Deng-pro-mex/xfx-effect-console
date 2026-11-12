@@ -628,6 +628,40 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--click-still-applies") {
+            // The drag guard must not swallow a plain click: with the poll timer now
+            // running from the moment the mouse goes down, a click that never reaches the
+            // strip has to keep its normal "apply this result" behaviour.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            const int row_top = row.top + 4;
+            const auto before_slots = g_state->settings.row_slots;
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row_top));
+            assert(g_state->result_drag_armed);
+            // Pointer stays over the list the whole time: no strip cell, no drag.
+            g_test_drag_button_held = false;
+            g_test_drag_cursor = POINT{0, 0};
+            SendMessageW(g_state->results, WM_TIMER, kResultDragTimerId, 0);
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            assert(g_state->result_drag_armed);          // untouched by the timer
+            SendMessageW(g_state->results, WM_LBUTTONUP, 0, MAKELPARAM(12, row_top));
+            pump();
+            assert(!g_state->result_drag_armed);
+            // Nothing was bound by the click, and the apply path was reached.
+            assert(g_state->settings.row_slots == before_slots);
+            std::cout << "PASS a click that never reaches the strip still applies\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-release-away") {
             // A real drag can end without the list ever seeing WM_LBUTTONUP: the release
             // goes to whatever window is under the cursor. The poll timer is what catches
