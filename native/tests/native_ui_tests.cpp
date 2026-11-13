@@ -567,6 +567,58 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-without-capture") {
+            // Drag-to-bind must not depend on SetCapture succeeding. Another app (or AE
+            // itself) can hold the mouse capture, and then no WM_MOUSEMOVE/WM_LBUTTONUP
+            // ever arrives at the list - the exact "dragging does nothing" symptom. The
+            // poll timer reads the cursor and the button state, so it must finish the drop
+            // on its own.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            POINT saved{};
+            assert(GetCursorPos(&saved));
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[4], &cell));
+            assert(SetCursorPos((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2));
+            // No WM_MOUSEMOVE and no WM_LBUTTONUP are delivered to the list: only the poll
+            // can finish the drop.
+            g_test_drag_button_held = false;    // the user let go
+            g_test_drag_cursor = POINT{(cell.left + cell.right) / 2,
+                                       (cell.top + cell.bottom) / 2};
+            for (int tick = 0; tick < 6 && g_state->result_drag_armed; ++tick) {
+                handle_drag_poll();
+                pump_for(30);
+            }
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            SetCursorPos(saved.x, saved.y);
+            pump_for(120);
+            std::cout << "  armed=" << (g_state->result_drag_armed ? 1 : 0)
+                      << " slot4=" << (g_state->settings.row_slots[4].empty() ? "empty" : "bound") << "\n";
+            assert(!g_state->result_drag_armed);
+            assert(!g_state->settings.row_slots[4].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[4] ==
+                g_state->settings.row_slots[4]);
+            std::cout << "PASS drag-to-bind completes even when the mouse capture is stolen\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--settings-bool-roundtrip") {
             // A single off-by-one in the parser made "ResultDigitShortcut=0" read back as
             // enabled, so the switch could never be turned off. Every boolean must survive
