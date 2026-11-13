@@ -2121,21 +2121,24 @@ int wmain(int argc, wchar_t** argv) {
             g_state->settings.show_slot_row = true;
             for (int slot = 0; slot < 9; ++slot)
                 g_state->settings.row_slots[static_cast<size_t>(slot)].clear();
+            // Bind the first five effects the catalog actually holds, so the screenshot
+            // shows real names rather than placeholders.
+            const int cells[] = {0, 2, 5, 8, 7};
+            int chosen = 0;
             for (const auto& item : g_state->catalog) {
+                if (chosen >= 5) break;
                 if (item.item_type != L"effect") continue;
-                for (int slot : {0, 2, 5, 8}) {
-                    if (!g_state->settings.row_slots[static_cast<size_t>(slot)].empty()) continue;
-                    g_state->settings.row_slots[static_cast<size_t>(slot)] = item_key(item);
-                }
-                if (!g_state->settings.row_slots[0].empty() &&
-                    !g_state->settings.row_slots[2].empty() &&
-                    !g_state->settings.row_slots[5].empty() &&
-                    !g_state->settings.row_slots[8].empty()) break;
+                if (item.match_name.empty()) continue;
+                g_state->settings.row_slots[static_cast<size_t>(cells[chosen])] = item_key(item);
+                ++chosen;
             }
+            std::cout << "  bound " << chosen << " cells from the fixture catalog\n";
+            assert(chosen >= 2);   // bound and empty cells must both appear
             SetWindowTextW(g_state->search, L"");
             populate_results();
             layout_controls(g_state->window);
-            pump_for(240);
+            adjust_console_height();
+            pump_for(260);
             if (argc > 1) {
                 save_test_preview(g_state->window,
                     fs::path(argv[1]).parent_path() / L"second-strip-preview.png");
@@ -2144,17 +2147,36 @@ int wmain(int argc, wchar_t** argv) {
             // Bound cells must show a label; the tooltip table is what the user reads.
             // Every bound cell must resolve to a visible label, and every cell must have
             // a non-empty tooltip (that is the only explanation of what the row does).
+            int bound_cells = 0;
             for (int slot = 0; slot < 9; ++slot) {
                 const auto label = slot_row_display_label(slot);
                 assert(!label.empty());
                 const bool bound = !g_state->settings.row_slots[static_cast<size_t>(slot)].empty();
-                if (bound) assert(label != L"空");
+                if (bound) { assert(label != L"空"); ++bound_cells; }
+                // Each cell must also have a tooltip registered, or the row explains nothing.
+                // TOOLINFOW has no cchTextMax member (that is TOOLINFO before V2 sizing);
+                // the buffer is simply large enough.
+                TOOLINFOW query{};
+                query.cbSize = sizeof(query);
+                query.hwnd = g_state->window;
+                query.uId = static_cast<UINT_PTR>(600 + slot);
+                wchar_t tip[512]{};
+                query.lpszText = tip;
+                if (g_state->tooltip && SendMessageW(g_state->tooltip, TTM_GETTOOLINFO, 0,
+                        reinterpret_cast<LPARAM>(&query))) {
+                    assert(tip[0] != L'\0');
+                }
             }
+            std::cout << "  bound cells=" << bound_cells
+                      << " strip height=" << [] {
+                          RECT r{}; GetWindowRect(g_state->window, &r); return r.bottom - r.top;
+                      }() << "\n";
+            assert(bound_cells == chosen);
             std::cout << "PASS the second strip renders bound and empty cells\n";
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
-        else if (check == L"--popup-round") {
+else if (check == L"--popup-round") {
             // round_combo_popup clips a dropdown list to rounded corners. The real system
             // popup cannot be resized safely in this harness, so exercise the same helper
             // on a window we own.
