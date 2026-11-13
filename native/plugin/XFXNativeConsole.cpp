@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.55";
+constexpr char kProductVersion[] = "1.5.56";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1866,6 +1866,14 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             result_action_click = result_action_at_point(
                 {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}) != ResultAction::None;
         }
+        // Record the gesture as it arrives. A drag that does nothing on the user's machine
+        // is indistinguishable from one that was never delivered; this settles it.
+        if (g_state->settings.show_slot_row) update_trace("result-down row=" + std::to_string(HIWORD(hit) ? -1 : static_cast<int>(LOWORD(hit))) +
+            " x=" + std::to_string(GET_X_LPARAM(lparam)) + " y=" + std::to_string(GET_Y_LPARAM(lparam)) +
+            " modal=" + std::to_string(g_state->modal_depth) +
+            " applying=" + (g_state->applying_item ? "1" : "0") +
+            " action=" + (result_action_click ? "1" : "0") +
+            " strip=" + (g_state->settings.show_slot_row ? "1" : "0"));
     }
     if (!result_action_click && forward_edge_drag(hwnd, message, wparam, lparam)) return 0;
     if (message == WM_MOUSEMOVE && g_state->result_drag_armed) {
@@ -2025,6 +2033,8 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
 
             repaint_slot_row_cells();
             if (drop_target >= 0) {
+                update_trace("result-drop-bind target=" + std::to_string(drop_target) +
+                    " row=" + std::to_string(drop_row));
                 SendMessageW(hwnd, LB_SETCURSEL, drop_row, 0);
                 assign_row_slot_dragged(drop_target, drop_row);
                 restore_redraw(true);
@@ -2032,6 +2042,7 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 return 0;
             }
 
+            update_trace("result-drop-miss target=-1");
             const LRESULT hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lparam);
             if (HIWORD(hit) || static_cast<int>(LOWORD(hit)) != pending_row) {
                 restore_redraw(true);
