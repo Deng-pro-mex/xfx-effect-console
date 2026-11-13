@@ -567,6 +567,60 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-zoom-scale") {
+            // A drag is resolved by testing the REAL cursor against each cell's screen
+            // rectangle. At a non-100 % scale those rectangles are scaled, and a hit test
+            // against a mis-scaled rectangle silently binds the wrong cell or nothing.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            for (int scale : {1, 2, 3}) {
+                // Verify every cell maps its own centre back to its own index.
+                for (int slot = 0; slot < 9; ++slot) {
+                    const HWND cell = g_state->slot_row_buttons[static_cast<size_t>(slot)];
+                    assert(cell && IsWindowVisible(cell));
+                    RECT box{};
+                    assert(GetWindowRect(cell, &box));
+                    const POINT centre{(box.left + box.right) / 2, (box.top + box.bottom) / 2};
+                    std::cout << "  scale=" << scale << " cell=" << slot
+                              << " centre=" << centre.x << "," << centre.y
+                              << " hit=" << slot_row_cell_at(centre) << "\n";
+                    assert(slot_row_cell_at(centre) == slot);
+                    // A point one pixel outside the cell must not resolve to it.
+                    const POINT outside{box.right + 2, centre.y};
+                    assert(slot_row_cell_at(outside) != slot);
+                }
+                // And a real drop on the fifth cell binds exactly that cell.
+                RECT target{};
+                assert(GetWindowRect(g_state->slot_row_buttons[4], &target));
+                const POINT drop{(target.left + target.right) / 2, (target.top + target.bottom) / 2};
+                g_test_drag_cursor = drop;
+                g_state->result_drag_row = 0;
+                g_state->result_drag_armed = true;
+                g_test_drag_button_held = false;      // released
+                handle_drag_poll();
+                g_test_drag_button_held.reset();
+                g_test_drag_cursor.reset();
+                pump_for(80);
+                assert(!g_state->settings.row_slots[4].empty());
+                for (int other = 0; other < 9; ++other) {
+                    if (other == 4) continue;
+                    assert(g_state->settings.row_slots[static_cast<size_t>(other)].empty());
+                }
+                for (auto& slot : g_state->settings.row_slots) slot.clear();
+            }
+            std::cout << "PASS dragging resolves the exact cell at every scale factor\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--small-screen") {
             // The palette is 520 logical pixels wide and grows downwards with the strip and
             // the results. On a laptop at 150 % with a 1366x768 screen the work area is only
