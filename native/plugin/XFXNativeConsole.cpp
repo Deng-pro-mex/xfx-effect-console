@@ -135,7 +135,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.66";
+constexpr char kProductVersion[] = "1.5.67";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -5967,26 +5967,43 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 action_rect.bottom -= px(3);
                 const bool hovered = g_state->result_hover_row == static_cast<int>(draw->itemID) &&
                     g_state->result_hover_action == action;
-                HBRUSH action_brush = CreateSolidBrush(hovered ? colors().button_pressed :
-                    (selected ? colors().selected : colors().input));
-                FillRect(draw->hDC, &action_rect, action_brush);
-                DeleteObject(action_brush);
+                if (hovered) {
+                    // Rounded hover chip instead of a square block, so the row's action
+                    // cells belong to the same card language as everything else.
+                    RECT chip = action_rect;
+                    InflateRect(&chip, -px(1), -px(1));
+                    xfx::paint_round_rect(draw->hDC, chip,
+                        selected ? colors().selected : colors().button_pressed,
+                        static_cast<float>(px(4)), std::nullopt);
+                }
                 const COLORREF icon_color = selected ? colors().selected_text : colors().muted;
+                const bool active_state = item && ((action == ResultAction::Pin &&
+                        contains_key(g_state->settings.pinned, item_key(*item))) ||
+                    (action == ResultAction::Favorite &&
+                        contains_key(g_state->settings.favorites, item_key(*item))));
                 Gdiplus::Graphics graphics(draw->hDC);graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 graphics.TranslateTransform((action_rect.left+action_rect.right)*.5f,(action_rect.top+action_rect.bottom)*.5f);
                 const float scale=ui_px(100)/100.0f;graphics.ScaleTransform(scale,scale);
-                Gdiplus::Pen pen(vector_color(icon_color),1.5f);pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);pen.SetLineJoin(Gdiplus::LineJoinRound);
+                Gdiplus::Pen pen(vector_color(icon_color),1.7f);
+                pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);pen.SetLineJoin(Gdiplus::LineJoinRound);
+                Gdiplus::SolidBrush solid(vector_color(selected ? colors().selected_text : colors().accent));
                 if(action==ResultAction::Pin) {
-                    graphics.DrawLine(&pen,-8.25f,-8.25f,8.25f,-8.25f);
-                    graphics.DrawLine(&pen,0.0f,8.25f,0.0f,-4.0f);
-                    graphics.DrawLine(&pen,-7.0f,3.0f,0.0f,-4.0f);graphics.DrawLine(&pen,0.0f,-4.0f,7.0f,3.0f);
+                    // Pin: a round head on a needle. Filled once the row is pinned, so the
+                    // cell states what it is, not only what it would do.
+                    if (active_state) graphics.FillEllipse(&solid,-4.6f,-8.0f,9.2f,9.2f);
+                    else graphics.DrawEllipse(&pen,-4.6f,-8.0f,9.2f,9.2f);
+                    graphics.DrawLine(&pen,0.0f,1.2f,0.0f,8.4f);
+                    graphics.DrawLine(&pen,-3.2f,8.4f,3.2f,8.4f);
                 } else if(action==ResultAction::Favorite) {
                     Gdiplus::PointF points[10];
                     for(int n=0;n<10;++n){const float angle=-1.5707963f+n*3.14159265f/5,r=(n%2)?3.5f:8.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
-                    if(item && contains_key(g_state->settings.favorites,item_key(*item))){Gdiplus::SolidBrush fill(vector_color(icon_color));graphics.FillPolygon(&fill,points,10);}
+                    if(active_state) graphics.FillPolygon(&solid,points,10);
                     else graphics.DrawPolygon(&pen,points,10);
                 } else {
-                    graphics.DrawLine(&pen,-8.25f,0.0f,8.25f,0.0f);graphics.DrawLine(&pen,0.0f,-8.25f,0.0f,8.25f);
+                    // Add-to-slot: a circled plus, matching the round pin head.
+                    graphics.DrawEllipse(&pen,-7.4f,-7.4f,14.8f,14.8f);
+                    graphics.DrawLine(&pen,-3.6f,0.0f,3.6f,0.0f);
+                    graphics.DrawLine(&pen,0.0f,-3.6f,0.0f,3.6f);
                 }
             };
             if (!shortcut_mode) {
