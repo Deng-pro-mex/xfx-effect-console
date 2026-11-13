@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.45";
+constexpr char kProductVersion[] = "1.5.46";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2599,13 +2599,27 @@ void update_trace(const std::string& text, bool always) {
         std::error_code size_error;
         const auto bytes = fs::exists(file, size_error) ? fs::file_size(file, size_error) : 0;
         if (!size_error && bytes > 1024 * 1024) fs::remove(file, size_error);
-        std::ofstream out(file, std::ios::app | std::ios::binary);
         SYSTEMTIME now{};
         GetLocalTime(&now);
         char stamp[32]{};
         sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d ", now.wYear, now.wMonth, now.wDay,
                   now.wHour, now.wMinute, now.wSecond);
+        std::ofstream out(file, std::ios::app | std::ios::binary);
         out << stamp << text << "\r\n";
+        out.flush();
+        if (!out) {
+            // The primary location is not writable. A log nobody can read is the same as no
+            // log at all, so try the user's local application data once.
+            out.close();
+            wchar_t local[MAX_PATH]{};
+            if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local) == S_OK) {
+                const auto fallback = fs::path(local) / L"XFXConsole" / L"effect-console.log";
+                std::error_code make_error;
+                fs::create_directories(fallback.parent_path(), make_error);
+                std::ofstream alternate(fallback, std::ios::app | std::ios::binary);
+                alternate << stamp << text << "\r\n";
+            }
+        }
     } catch (...) {}
 }
 

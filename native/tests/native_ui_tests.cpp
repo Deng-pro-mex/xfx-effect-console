@@ -567,6 +567,37 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--diagnostics-written") {
+            // Everything the plugin can report about a failure on a machine we cannot see
+            // goes through update_trace. If that silently drops writes there is no evidence
+            // at all, which is why the same report cannot be reproduced.
+            const auto log = xfx::SettingsStore::load(g_test_settings_path);
+            (void)log;
+            const auto trace_path = (g_test_settings_path.parent_path() / L"effect-console.log");
+            std::error_code ignored;
+            fs::remove(trace_path, ignored);
+            update_trace("unit-test-marker v=1");
+            update_trace(std::string("plugin-loaded version=") + kProductVersion);
+            assert(fs::exists(trace_path));
+            {
+                std::ifstream in(trace_path, std::ios::binary);
+                const std::string text((std::istreambuf_iterator<char>(in)), {});
+                assert(text.find("unit-test-marker v=1") != std::string::npos);
+                assert(text.find("plugin-loaded version=") != std::string::npos);
+                // A timestamp prefix that the support flow relies on when reading it.
+                assert(text.size() > 20 && text[4] == '-' && text[7] == '-');
+            }
+            // And the file must stay bounded: a log that grows for ever is worse than none.
+            std::string filler(1024, 'x');
+            for (int n = 0; n < 1200; ++n) update_trace(filler);
+            const auto size = fs::file_size(trace_path, ignored);
+            std::cout << "  log size after the rotation check: " << size << " bytes\n";
+            assert(!ignored);
+            assert(size <= 1024 * 1024 + 4096);
+            std::cout << "PASS the diagnostic log is written, timestamped and bounded\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--first-open-latency") {
             // The very first open builds the whole catalogue synchronously inside WM_CREATE.
             // If that takes long the palette appears frozen with no window at all, which is
