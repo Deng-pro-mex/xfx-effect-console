@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.61";
+constexpr char kProductVersion[] = "1.5.62";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1065,11 +1065,17 @@ void update_trace(const std::string& text, bool always = false);
 void set_status(const std::wstring& message, bool success = false);
 int slot_row_cell_at(POINT point) {
     if (!g_state) return -1;
+    // A couple of pixels of tolerance: cells are 56 px wide at 100 %, and releasing a hair
+    // outside a cell used to end the drag with nothing happening at all. A near miss must
+    // bind, not silently fail.
+    const int slack = (std::max)(2, MulDiv(3, GetDpiForWindow(g_state->window), 96));
     for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
         RECT cell{};
         if (!IsWindowVisible(g_state->slot_row_buttons[index])) continue;
         if (!GetWindowRect(g_state->slot_row_buttons[index], &cell)) continue;
-        if (PtInRect(&cell, point)) return static_cast<int>(index);
+        RECT reach = cell;
+        InflateRect(&reach, slack, slack);
+        if (PtInRect(&reach, point)) return static_cast<int>(index);
     }
     return -1;
 }
@@ -1100,10 +1106,18 @@ void stop_drag_poll() {
     if (owner) KillTimer(owner, kResultDragTimerId);
 }
 
+// One source of truth for the drag cursor: the real pointer, with the test override applied.
+bool pointer_cursor_position(POINT& cursor) {
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_drag_cursor) { cursor = *g_test_drag_cursor; return true; }
+#endif
+    return GetCursorPos(&cursor) != FALSE;
+}
+
 void update_result_drag_target() {
     if (!g_state) return;
     POINT cursor{};
-    if (!GetCursorPos(&cursor)) return;
+    if (!pointer_cursor_position(cursor)) return;
 #ifdef XFX_CONSOLE_TEST
     if (g_test_drag_cursor) cursor = *g_test_drag_cursor;
 #endif
@@ -1786,7 +1800,34 @@ void handle_drag_poll() {
         // pointer never reached a cell this is an ordinary click, so leave the click
         // state untouched for WM_LBUTTONUP to handle.
         stop_drag_poll();
-        if (g_state->result_drag_target < 0) return;
+        if (g_state->result_drag_target < 0) {
+            // A release away from every cell is only a drag ATTEMPT if the pointer actually
+            // left the list. One that stayed inside is an ordinary click and must keep its
+            // apply behaviour, so cancel the gesture only for a real miss.
+            POINT cursor{};
+            RECT list_rect{};
+            const bool outside = pointer_cursor_position(cursor) && list &&
+                GetWindowRect(list, &list_rect) && !PtInRect(&list_rect, cursor);
+            if (outside && g_state->result_drag_row >= 0) {
+                if (!IsWindowVisible(g_state->slot_row_buttons[0]))
+                    set_status(L"第二行快捷栏已关闭，请先在设置里打开它再拖动绑定");
+                else
+                    set_status(L"没有放到格子上：请把结果拖到 Alt+1…Alt+9 那一行的格子里再松手");
+                g_state->result_drag_armed = false;
+                g_state->result_drag_row = -1;
+                g_state->result_drag_target = -1;
+                repaint_slot_row_cells();
+                if (list && GetCapture() == list) ReleaseCapture();
+                if (g_state->result_click_redraw_held) {
+                    g_state->result_click_redraw_held = false;
+                    if (list && IsWindow(list)) SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+                }
+                g_state->result_click_pending = false;
+                g_state->result_click_row = -1;
+                g_state->result_click_action = ResultAction::None;
+            }
+            return;
+        }
         const int drop_target = g_state->result_drag_target;
         const int drag_row = g_state->result_drag_row;
         g_state->result_drag_armed = false;
@@ -2006,6 +2047,8 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (drop_target >= 0 && drag_row >= 0) assign_row_slot_dragged(drop_target, drag_row);
             else if (drop_target < 0 && drag_row >= 0 && !IsWindowVisible(g_state->slot_row_buttons[0]))
                 set_status(L"第二行快捷栏已关闭，请先在设置里打开它再拖动绑定");
+            else if (drop_target < 0 && drag_row >= 0)
+                set_status(L"没有放到格子上：请把结果拖到 Alt+1…Alt+9 那一行的格子里再松手");
             return 0;
         }
         if (g_state->result_click_pending) {

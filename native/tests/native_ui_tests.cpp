@@ -567,6 +567,80 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--strip-on-by-default") {
+            // The drag complaint has a plain cause: the second row was OFF by default, so a
+            // fresh install had nothing to drag onto. It must ship ON, and a near miss must
+            // still bind instead of ending the drag in silence.
+            xfx::Settings defaults;
+            std::cout << "  default show_slot_row=" << (defaults.show_slot_row ? 1 : 0)
+                      << " modifier=" << wide_to_utf8(defaults.slot_row_modifier) << "\n";
+            assert(defaults.show_slot_row);
+
+            // It must survive a save/load round trip, so an upgraded file keeps it on.
+            xfx::SettingsStore::save(g_test_settings_path, defaults);
+            const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+            assert(reloaded.show_slot_row);
+
+            // And a settings file written by an OLD version (no ShowSlotRow key) keeps it on.
+            {
+                std::ofstream legacy(g_test_settings_path, std::ios::binary);
+                legacy << "Hotkey=Ctrl+Space\r\nThemeMode=dark\r\n";
+            }
+            const auto upgraded = xfx::SettingsStore::load(g_test_settings_path);
+            std::cout << "  upgraded file show_slot_row=" << (upgraded.show_slot_row ? 1 : 0) << "\n";
+            assert(upgraded.show_slot_row);
+
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            // Near miss: aim at the pixel just past a cell's right edge. It must still bind.
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[4], &cell));
+            g_test_drag_cursor = POINT{cell.right + 1, (cell.top + cell.bottom) / 2};
+            g_test_drag_button_held = false;
+            for (int tick = 0; tick < 8 && g_state->result_drag_armed; ++tick) {
+                handle_drag_poll();
+                pump_for(30);
+            }
+            g_test_drag_cursor.reset();
+            g_test_drag_button_held.reset();
+            pump_for(120);
+            std::cout << "  near miss bound slot5="
+                      << (g_state->settings.row_slots[4].empty() ? "EMPTY" : "bound") << "\n";
+            assert(!g_state->settings.row_slots[4].empty());
+
+            // A real miss must explain itself rather than doing nothing.
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            g_test_drag_cursor = POINT{cell.left, cell.bottom + 120};
+            g_test_drag_button_held = false;
+            for (int tick = 0; tick < 8 && g_state->result_drag_armed; ++tick) {
+                handle_drag_poll();
+                pump_for(30);
+            }
+            g_test_drag_cursor.reset();
+            pump_for(120);
+            wchar_t status[512]{};
+            GetWindowTextW(g_state->status, status, 512);
+            std::cout << "  miss status: " << wide_to_utf8(status) << "\n";
+            assert(std::wstring(status).find(L"没有放到格子上") != std::wstring::npos);
+            std::cout << "PASS the second strip ships on, near misses bind, and a miss explains itself\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--first-apply-no-error") {
             // The reported "first use shows a popup" is AE refusing scripting while it is
             // still settling. A first-time user must see a wait, not an error. Simulate a
@@ -1271,9 +1345,15 @@ int wmain(int argc, wchar_t** argv) {
                               << " centre=" << centre.x << "," << centre.y
                               << " hit=" << slot_row_cell_at(centre) << "\n";
                     assert(slot_row_cell_at(centre) == slot);
-                    // A point one pixel outside the cell must not resolve to it.
-                    const POINT outside{box.right + 2, centre.y};
+                    // Well outside the tolerance ring the cell must not answer: the point
+                    // is that a drop never bleeds into a neighbour, not that the edges are
+                    // pixel-exact (a few pixels of slack is deliberate, see the hit test).
+                    const int slack = (std::max)(2, MulDiv(3, GetDpiForWindow(g_state->window), 96));
+                    const POINT outside{box.right + slack + 8, centre.y};
                     assert(slot_row_cell_at(outside) != slot);
+                    // A point just inside the tolerance ring still resolves to this cell.
+                    const POINT near_edge{box.right + 1, centre.y};
+                    assert(slot_row_cell_at(near_edge) == slot);
                 }
                 // And a real drop on the fifth cell binds exactly that cell.
                 RECT target{};
@@ -2796,8 +2876,11 @@ int wmain(int argc, wchar_t** argv) {
             SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row_top));
             assert(g_state->result_drag_armed);
             // Pointer stays over the list the whole time: no strip cell, no drag.
+            RECT list_box{};
+            assert(GetWindowRect(g_state->results, &list_box));
             g_test_drag_button_held = false;
-            g_test_drag_cursor = POINT{0, 0};
+            g_test_drag_cursor = POINT{(list_box.left + list_box.right) / 2,
+                                       (list_box.top + list_box.bottom) / 2};
             SendMessageW(g_state->window, WM_TIMER, kResultDragTimerId, 0);
             g_test_drag_button_held.reset();
             g_test_drag_cursor.reset();

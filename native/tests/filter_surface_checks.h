@@ -73,7 +73,8 @@ static void check_filter_background_transitions(const fs::path& artifacts={}) {
         assert(good && "Filter resize failed to repaint parent footer/gaps before a forced repaint");
         RECT window{};GetWindowRect(g_state->window,&window);
         const int rows=selection==3?static_cast<int>(g_state->settings.favorites.size()):8;
-        assert(client.bottom==ui_px(56+rows*kResultHeight+kLayerStyleRowHeight+22));
+        const int strip=g_state->settings.show_slot_row?kSlotRowHeight:0;
+        assert(client.bottom==ui_px(56+rows*kResultHeight+strip+kLayerStyleRowHeight+22));
         assert(window.bottom-window.top==client.bottom);
     };
     for(auto mode:{xfx::ThemeMode::Dark,xfx::ThemeMode::Light}){

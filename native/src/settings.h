@@ -31,8 +31,10 @@ struct Settings {
     // the numeric keypad is always excluded from this shortcut.
     bool result_digit_shortcut = true;
     ImeMode ime_mode = ImeMode::Restore;
-    // Optional nine-button favourites strip under the results list.
-    bool show_slot_row = false;
+    // Nine-button second strip under the results list. ON by default: it is the visible
+    // drop target for dragging a result, and with it off a drag has nowhere to land and
+    // appears to do nothing at all.
+    bool show_slot_row = true;
     // Key that runs favourites (modifier+1..9). Empty means Ctrl.
     std::wstring slot_row_modifier = L"Ctrl";
     // Key that applies the Nth visible result (modifier+1..9). Empty means none.
