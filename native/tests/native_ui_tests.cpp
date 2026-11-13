@@ -2485,6 +2485,56 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--modal-blocks-before-call") {
+            // A real session measured the refusal arriving only after ~53 s: AE blocked the
+            // UI thread inside AEGP_ExecuteScript and showed its own dialog. The modal state
+            // must therefore be detected BEFORE the call, from the thread's own UI state,
+            // not inferred from the (unreliable) scripting probe.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+
+            g_pending_applies.clear();
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            // The host reports scripting available; only the modal signal is set. The old
+            // code trusted the probe and called anyway.
+            g_test_scripting_available = true;
+            g_test_force_modal = true;
+            g_test_last_script.clear();
+            execute_selected();
+            assert(!g_pending_applies.empty());
+            for (int tick = 0; tick < 8; ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(40);
+            }
+            std::cout << "  while modal: reached_host=" << (g_test_last_script.empty() ? "no" : "YES")
+                      << " queued=" << g_pending_applies.size() << "\n";
+            // Nothing may reach the host: that call blocks for a minute and raises AE's dialog.
+            assert(g_test_last_script.empty());
+            assert(!g_pending_applies.empty());
+            assert(g_test_message_box_count == 0);
+
+            // The dialog closes: the same request runs.
+            g_test_force_modal = false;
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            bool ran = false;
+            for (int tick = 0; tick < 12 && !ran; ++tick) ran = run_pending_apply_on_idle();
+            g_test_script_reply.reset();
+            g_test_scripting_available.reset();
+            std::cout << "  after modal clears: ran=" << (ran ? 1 : 0)
+                      << " host_calls=" << (g_test_last_script.empty() ? 0 : 1) << "\n";
+            assert(ran);
+            assert(!g_test_last_script.empty());
+            assert(g_test_message_box_count == 0);
+            std::cout << "PASS a modal host blocks the apply before any script call\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--right-click-menu") {
             // A listbox never forwards right-clicks to its parent, so the result menu - the
             // only mouse route to "bind to the second strip" - never opened. This drives the

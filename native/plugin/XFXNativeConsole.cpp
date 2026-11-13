@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.64";
+constexpr char kProductVersion[] = "1.5.65";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2630,12 +2630,27 @@ bool ae_modal_pending() {
     // maintains, so it is used as the authority here. AEGP_IsScriptingAvailable is not
     // trustworthy for this: it reports "available" even while a modal loop is running
     // (confirmed by apply-trace.log, which recorded success status with an error text).
+    // A popup menu, the window menu, or a window being moved/resized owns a modal message
+    // loop on this thread. AEGP refuses scripting there, and the refusal arrives only after
+    // the user dismisses the dialog, so the check must be made BEFORE the call.
+    GUITHREADINFO thread_info{sizeof(GUITHREADINFO)};
+    constexpr DWORD kGuiInMenu = 0x00000004;      // GUITF_MENU
+    constexpr DWORD kGuiSysMenu = 0x00000008;     // GUITF_SYSMENU
+    constexpr DWORD kGuiModeMoveSize = 0x00000020;  // GUITF_INMOVESIZE
+    constexpr DWORD kGuiInResizeMove = 0x00000040;  // GUITF_INRESIZEMOVE
+    if (GetGUIThreadInfo(GetCurrentThreadId(), &thread_info) &&
+        (thread_info.flags & (kGuiInMenu | kGuiSysMenu | kGuiModeMoveSize | kGuiInResizeMove)) != 0) {
+        update_trace("modal-owner=menu flags=" + std::to_string(thread_info.flags));
+        return true;
+    }
     struct Probe {
         DWORD pid;
         HWND console;
+        HWND main_window = nullptr;
         bool disabled_top_level = false;
         bool disabled_owner = false;
-    } probe{GetCurrentProcessId(), g_state ? g_state->window : nullptr, false, false};
+        bool dialog_open = false;
+    } probe{GetCurrentProcessId(), g_state ? g_state->window : nullptr, nullptr, false, false, false};
     EnumWindows([](HWND window, LPARAM raw) -> BOOL {
         auto* state = reinterpret_cast<Probe*>(raw);
         DWORD pid = 0;
@@ -2651,9 +2666,17 @@ bool ae_modal_pending() {
         const HWND owner = GetWindow(window, GW_OWNER);
         if (owner && owner != state->console && !IsWindowEnabled(owner) && IsWindowVisible(owner))
             state->disabled_owner = true;
+        // AE's own dialogs use the standard dialog class; any visible one of this process
+        // means a modal loop is running even if the main window still looks enabled.
+        wchar_t name[32]{};
+        if (GetClassNameW(window, name, 32) && lstrcmpW(name, L"#32770") == 0)
+            state->dialog_open = true;
         return TRUE;
     }, reinterpret_cast<LPARAM>(&probe));
-    return probe.disabled_top_level || probe.disabled_owner;
+    if (probe.dialog_open) update_trace("modal-owner=dialog");
+    else if (probe.disabled_top_level) update_trace("modal-owner=disabled-top");
+    else if (probe.disabled_owner) update_trace("modal-owner=disabled-owner");
+    return probe.disabled_top_level || probe.disabled_owner || probe.dialog_open;
 }
 
 // AE's own wording when a script is refused because a modal dialog is up. Matched
@@ -2980,12 +3003,25 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
             }
             return text;
         };
+        // Last-moment check: a popup can open between the idle pre-check and this line.
+        // A call made then blocks the UI thread for a minute and only then reports the
+        // refusal (measured 53 s in a real session), which is far worse than waiting.
+        if (ae_modal_pending()) {
+            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
+            xfx::ScriptReply deferred;
+            deferred.pending = true;
+            deferred.message = "AE 正在等待对话框关闭，操作已排队";
+            return deferred;
+        }
         update_trace("execute-begin");
+        const ULONGLONG execute_started = GetTickCount64();
         const A_Err error = suites.UtilitySuite6()->AEGP_ExecuteScript(
             g_plugin_id, script.c_str(), FALSE, &result_handle, &error_handle);
+        const ULONGLONG execute_elapsed = GetTickCount64() - execute_started;
         const std::string result = read_handle(result_handle);
         const std::string script_error = read_handle(error_handle);
         update_trace("execute-end err=" + std::to_string(static_cast<int>(error)) +
+            " ms=" + std::to_string(execute_elapsed) +
             " msg=" + script_error.substr(0, 160));
         // AE refuses scripting while its own modal dialog is up. Detect that exact
         // failure and park the script for the next idle callback instead of letting
