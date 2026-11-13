@@ -142,9 +142,9 @@ bool launch_auto_install() {
     if (!g_auto_install_pending || !g_update_client) return false;
     const auto info = g_update_client->status();
     if (info.state != xfx::UpdateInfo::Ready || info.installer.empty()) return false;
-    wchar_t host[32768]{};
-    if (!GetModuleFileNameW(nullptr, host, 32768)) return false;
-    const auto parameters = L"--wait-for-ae-exit --target \"" + fs::path(host).parent_path().wstring() + L"\"";
+    std::vector<wchar_t> host(32768, L'\0');
+    if (!GetModuleFileNameW(nullptr, host.data(), 32768)) return false;
+    const auto parameters = L"--wait-for-ae-exit --target \"" + fs::path(host.data()).parent_path().wstring() + L"\"";
     try {
         // Re-hash the cached installer and hold a deny-write lease through process
         // creation, including the user's UAC decision.
@@ -190,9 +190,9 @@ xfx::BridgeCompletion perform_update(bool check_only) {
             L"将启动更新安装器。\n\n请先保存所有工程，再自行退出所有 AE；回到安装器点击确定，并再次确认安装。\n程序不会关闭 AE，也不会清空个人配置。\n\n现在启动安装器？",
             L"安装更新", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
             return {false, 0, "cancelled", "已取消安装更新"};
-        wchar_t host[32768]{};
-        if (!GetModuleFileNameW(nullptr, host, 32768)) return {false, 0, "update_error", "无法确认当前 AE 安装目录"};
-        const auto parameters = L"--wait-for-ae-exit --target \"" + fs::path(host).parent_path().wstring() + L"\"";
+        std::vector<wchar_t> host(32768, L'\0');
+        if (!GetModuleFileNameW(nullptr, host.data(), 32768)) return {false, 0, "update_error", "无法确认当前 AE 安装目录"};
+        const auto parameters = L"--wait-for-ae-exit --target \"" + fs::path(host.data()).parent_path().wstring() + L"\"";
         try {
             // Revalidate the selected release and hold a deny-write/delete file
             // lease through process creation, including the user's UAC decision.

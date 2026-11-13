@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.63";
+constexpr char kProductVersion[] = "1.5.64";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1002,7 +1002,6 @@ void paint_text_button(const DRAWITEMSTRUCT& draw) {
     if (!saved) return;
     if (g_state->font) SelectObject(draw.hDC, g_state->font);
     const auto& palette = colors();
-    const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
     paint_button_surface(draw);
     wchar_t text[256]{}; GetWindowTextW(draw.hwndItem, text, 256);
     SetBkMode(draw.hDC, TRANSPARENT);
@@ -4177,7 +4176,7 @@ void restore_suspended_hotkey() {
 // choices is added so it stays visible and selectable.
 void select_hotkey_choice(const std::wstring& value) {
     if (!g_state || !g_state->hotkey_combo) return;
-    if (value.empty()) { SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, -1, 0); return; }
+    if (value.empty()) { SendMessageW(g_state->hotkey_combo, CB_SETCURSEL, static_cast<WPARAM>(-1), 0); return; }
     const LRESULT count = SendMessageW(g_state->hotkey_combo, CB_GETCOUNT, 0, 0);
     for (LRESULT index = 0; index < count; ++index) {
         wchar_t label[128]{};

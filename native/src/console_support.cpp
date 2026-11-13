@@ -70,9 +70,11 @@ bool has_traversal(const std::filesystem::path& path) {
 }
 
 DWORD directory_reparse_error(const std::filesystem::path& directory) {
-    wchar_t volume_path[32768] = {};
-    if (!GetVolumePathNameW(directory.c_str(), volume_path, 32768)) return GetLastError();
-    const auto volume_root = comparable_windows_path(std::filesystem::path(volume_path));
+    // Heap, not a 64 KB stack frame: this runs on the UI thread and the frame size alone
+    // was the largest in the module.
+    std::vector<wchar_t> volume_path(32768, L'\0');
+    if (!GetVolumePathNameW(directory.c_str(), volume_path.data(), 32768)) return GetLastError();
+    const auto volume_root = comparable_windows_path(std::filesystem::path(volume_path.data()));
     for (auto part = directory; !part.empty();) {
         auto comparable = comparable_windows_path(part);
         // std::filesystem may yield \\?\C: as the parent of an extended

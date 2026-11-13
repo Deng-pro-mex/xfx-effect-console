@@ -364,7 +364,9 @@ void publish_stream(IStream* stream, const std::filesystem::path& target) {
     if (!description.cbSize.QuadPart) fail("截图编码结果为空");
     LARGE_INTEGER zero{}; check_hr(stream->Seek(zero, STREAM_SEEK_SET, nullptr), "无法读取截图编码数据");
     auto remaining = description.cbSize.QuadPart;
-    std::array<BYTE, 64 * 1024> block{};
+    // Heap, not a 64 KB stack frame: publish_stream runs on the UI thread and the frame
+    // size alone was flagged by static analysis.
+    std::vector<BYTE> block(64 * 1024, 0);
     while (remaining) {
         const ULONG count = static_cast<ULONG>((std::min)(remaining, static_cast<ULONGLONG>(block.size())));
         ULONG read = 0; check_hr(stream->Read(block.data(), count, &read), "无法读取截图编码数据");
