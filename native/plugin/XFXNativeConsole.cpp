@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.58";
+constexpr char kProductVersion[] = "1.5.59";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2779,6 +2779,19 @@ bool run_pending_apply_on_idle() {
     // teardown path treats "hidden" as "the user closed it", so without this the queued
     // close destroys the palette mid-apply and a failed apply loses the console.
     if (g_state) g_state->applying_item = true;
+    // A drag cannot continue across the hide: the user cannot see the drop target, and the
+    // poll would bind from a cursor that has moved on. Cancel it here, before hiding.
+    if (g_state && (g_state->result_drag_armed || g_state->result_click_pending)) {
+        g_state->result_drag_armed = false;
+        g_state->result_drag_row = -1;
+        g_state->result_drag_target = -1;
+        stop_drag_poll();
+        repaint_slot_row_cells();
+        if (g_state->result_click_redraw_held && IsWindow(g_state->results)) {
+            g_state->result_click_redraw_held = false;
+            SendMessageW(g_state->results, WM_SETREDRAW, TRUE, 0);
+        }
+    }
     if (console_was_visible) ShowWindow(console_window, SW_HIDE);
     if (GetCapture() == console_window || (console_window && IsChild(console_window, GetCapture())))
         ReleaseCapture();
@@ -6074,6 +6087,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_DESTROY:
         KillTimer(hwnd,0xB003); KillTimer(hwnd,kSettingsAnimationTimerId);
         KillTimer(hwnd, kDragTimerId);
+        // The drag poll owns a 30 ms timer on this window. Closing mid-drag left it running
+        // against a destroyed HWND; it then fired into the NEXT session and could bind from
+        // a stale cursor reading.
+        KillTimer(hwnd, kResultDragTimerId);
+        g_state->result_drag_armed = false;
+        g_state->result_drag_row = -1;
+        g_state->result_drag_target = -1;
+        if (GetCapture() == hwnd) ReleaseCapture();
         for (const auto& entry : g_state->button_hovers) KillTimer(entry.first, kButtonHoverTimerId);
         g_state->button_hovers.clear();
         g_state->drag_pending = false;

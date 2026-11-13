@@ -567,6 +567,91 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-cleanup") {
+            // Two leaks that only show up in a long session:
+            //  1. closing the palette mid-drag left the 30 ms poll timer running, which kept
+            //     firing into the next session and could bind from a stale cursor reading;
+            //  2. an apply hides the palette, so a drag must be cancelled before the hide,
+            //     not left armed against a window the user cannot see.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            // 1. Arm a drag, then close the palette while the button is still down.
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            g_test_drag_button_held = true;
+            g_test_drag_cursor = POINT{100, 100};
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(160);
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            assert(!IsWindow(g_state->window));
+            std::cout << "  after close mid-drag: armed=" << (g_state->result_drag_armed ? 1 : 0)
+                      << " row=" << g_state->result_drag_row << "\n";
+            assert(!g_state->result_drag_armed);
+            assert(g_state->result_drag_row == -1);
+            // The poll must be dead: another palette opened afterwards must not bind from
+            // the stale cursor reading left behind by the aborted drag.
+            assert(g_state->settings.row_slots[0].empty());
+            show_console();
+            pump_for(240);
+            for (int tick = 0; tick < 6; ++tick) { SendMessageW(g_state->window, WM_TIMER, kResultDragTimerId, 0); pump_for(40); }
+            for (int slot = 0; slot < 9; ++slot)
+                assert(g_state->settings.row_slots[static_cast<size_t>(slot)].empty());
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(120);
+
+            // 2. Arm a drag, then run an apply which hides the palette.
+            show_console();
+            pump_for(240);
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            g_test_drag_button_held = true;
+            g_test_drag_cursor = POINT{100, 100};
+            g_pending_applies.clear();
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 14 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            g_test_script_reply.reset();
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            pump_for(200);
+            std::cout << "  after apply: armed=" << (g_state->result_drag_armed ? 1 : 0)
+                      << " pending=" << (g_state->result_click_pending ? 1 : 0)
+                      << " redraw_held=" << (g_state->result_click_redraw_held ? 1 : 0) << "\n";
+            assert(!g_state->result_drag_armed);
+            assert(!g_state->result_click_pending);
+            assert(!g_state->result_click_redraw_held);
+            for (auto& slot : g_state->settings.row_slots) assert(slot.empty());
+
+            std::cout << "PASS closing or applying mid-drag cancels the drag completely\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-after-pages") {
             // A live session opens the settings page, closes it, searches, applies, and only
             // then drags. If any of those left the strip hidden or its rectangles stale, the
