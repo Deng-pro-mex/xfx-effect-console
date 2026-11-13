@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.46";
+constexpr char kProductVersion[] = "1.5.47";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1706,6 +1706,26 @@ LRESULT CALLBACK search_edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM
             SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(digit));
             return 0;
         }
+        // Shift + digit binds the highlighted result to that cell of the strip on screen.
+        // This is the keyboard route to the second row: type a few letters, press
+        // Shift + the cell number, and the cell is bound without dragging.
+        {
+            const UINT held_now = current_modifiers();
+            const bool shift_down = (held_now & MOD_SHIFT) != 0;
+            const bool control_down = (held_now & MOD_CONTROL) != 0;
+            const bool shift_is_a_shortcut =
+                (g_state->settings.show_slot_row &&
+                 (modifier_from_text(g_state->settings.slot_row_modifier) & MOD_SHIFT) != 0) ||
+                (g_state->settings.result_digit_shortcut &&
+                 (modifier_from_text(g_state->settings.result_digit_modifier) & MOD_SHIFT) != 0);
+            if (shift_down && !control_down && !shift_is_a_shortcut &&
+                wparam >= '1' && wparam <= '9') {
+                const int slot = static_cast<int>(wparam - '1');
+                if (g_state->settings.show_slot_row) assign_row_slot(slot);
+                else assign_slot(slot);
+                return 0;
+            }
+        }
         // Favourites slots win when the search box is empty; otherwise the digits
         // apply the Nth search result (configurable, keypad excluded).
         if (try_digit_shortcut(wparam, lparam, true)) return 0;
@@ -2108,10 +2128,28 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         return 0;
     }
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
+        const UINT held = current_modifiers();
+        const bool control = (held & MOD_CONTROL) != 0;
+        const bool shift = (held & MOD_SHIFT) != 0;
+        // Shift + digit assigns the selected result to that cell. It is decided before the
+        // configurable digit shortcuts so the gesture keeps working even when a group is
+        // configured to use Shift; otherwise the key would apply the effect instead. When
+        // either enabled group really is configured to use Shift, that shortcut wins and
+        // the assignment stays on the context menu.
+        const bool shift_is_a_shortcut =
+            (g_state->settings.show_slot_row &&
+             (modifier_from_text(g_state->settings.slot_row_modifier) & MOD_SHIFT) != 0) ||
+            (g_state->settings.result_digit_shortcut &&
+             (modifier_from_text(g_state->settings.result_digit_modifier) & MOD_SHIFT) != 0);
+        if (shift && !control && !shift_is_a_shortcut &&
+            wparam >= '1' && wparam <= '9') {
+            const int slot = static_cast<int>(wparam - '1');
+            if (g_state->settings.show_slot_row) assign_row_slot(slot);
+            else assign_slot(slot);
+            return 0;
+        }
         if (try_digit_shortcut(wparam, lparam, false)) return 0;
         if (try_result_digit_shortcut(wparam, lparam, false)) return 0;
-        const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (wparam == VK_RETURN) {
             execute_selected();
             return 0;
@@ -2122,18 +2160,6 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
         if (wparam == VK_TAB) {
             cycle_filter();
-            return 0;
-        }
-        // The digit shortcuts above already honour the configured modifiers and the
-        // active strip. A hardcoded Ctrl+digit branch here used to force the first
-        // strip, which made the second one impossible to bind.
-        if (wparam >= '1' && wparam <= '9' &&
-            (control || shift) && GetAsyncKeyState(VK_MENU) < 0) {
-            // Explicit slot assignment while a result is selected: Shift + digit binds
-            // whichever strip is currently on screen.
-            const int slot = static_cast<int>(wparam - '1');
-            if (g_state->settings.show_slot_row) assign_row_slot(slot);
-            else assign_slot(slot);
             return 0;
         }
     }

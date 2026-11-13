@@ -567,6 +567,74 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--keyboard-row-bind") {
+            // "选择绑定第二行" - binding a SELECTED result to the second row without a
+            // drag. Type, highlight, Shift+digit. The old branch also required Alt, so the
+            // gesture never fired at all.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            g_state->settings.result_digit_shortcut = false;
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            const LRESULT chosen = 0;
+            SendMessageW(g_state->results, LB_SETCURSEL, chosen, 0);
+            g_test_keyboard_modifiers = static_cast<UINT>(MOD_SHIFT);
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, chosen, 0);
+            assert(data != LB_ERR && data != 0);
+            const auto expected = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+
+            // From the results list.
+            SetFocus(g_state->results);
+            SendMessageW(g_state->results, WM_KEYDOWN, '3', 0);
+            pump_for(60);
+            std::cout << "  slot2 after Shift+3 on the list: "
+                      << (g_state->settings.row_slots[2].empty() ? "empty" : "bound") << "\n";
+            assert(!g_state->settings.row_slots[2].empty());
+            assert(g_state->settings.row_slots[2] == expected);
+
+            // From the search box: focus is there while the user types.
+            SetFocus(g_state->search);
+            SendMessageW(g_state->search, WM_KEYDOWN, '7', 0);
+            pump_for(60);
+            std::cout << "  slot6 after Shift+7 in the search box: "
+                      << (g_state->settings.row_slots[6].empty() ? "empty" : "bound") << "\n";
+            assert(!g_state->settings.row_slots[6].empty());
+            assert(g_state->settings.row_slots[6] == expected);
+
+            // The digit must NOT have been typed into the search box.
+            wchar_t text[64]{};
+            GetWindowTextW(g_state->search, text, 64);
+            std::cout << "  search text after the binds: " << wide_to_utf8(text) << "\n";
+            assert(std::wstring(text) == L"gao");
+
+            g_test_keyboard_modifiers.reset();
+            // And the bindings reached the file.
+            const auto saved = xfx::SettingsStore::load(g_test_settings_path);
+            assert(saved.row_slots[2] == expected);
+            assert(saved.row_slots[6] == expected);
+
+            // Shift must not bind when a group is configured to use Shift: that key is the
+            // effect shortcut then, and silently rebinding would be a regression.
+            g_state->settings.slot_row_modifier = L"Shift";
+            xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            SetFocus(g_state->results);
+            g_test_keyboard_modifiers = static_cast<UINT>(MOD_SHIFT);
+            SendMessageW(g_state->results, WM_KEYDOWN, '3', 0);
+            pump_for(60);
+            g_test_keyboard_modifiers.reset();
+            assert(g_state->settings.row_slots[2].empty());
+            std::cout << "PASS Shift+digit binds the selected result to the second row\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--diagnostics-written") {
             // Everything the plugin can report about a failure on a machine we cannot see
             // goes through update_trace. If that silently drops writes there is no evidence
