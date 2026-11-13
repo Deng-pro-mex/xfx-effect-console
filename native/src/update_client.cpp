@@ -213,7 +213,11 @@ Response open_response(const std::string& input) {
     DWORD disable = WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_AUTHENTICATION;
     win(WinHttpSetOption(h->request, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable)) != FALSE, "Cannot restrict HTTP features");
     DWORD max_headers = 32768; win(WinHttpSetOption(h->request, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, &max_headers, sizeof(max_headers)) != FALSE, "Cannot bound response headers");
-    win(WinHttpSendRequest(h->request, L"Accept: application/vnd.github+json\r\nAccept-Encoding: identity\r\nX-GitHub-Api-Version: 2022-11-28\r\n", static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE, "Update request failed");
+    constexpr wchar_t kRequestHeaders[] =
+        L"Accept: application/vnd.github+json\r\nAccept-Encoding: identity\r\n"
+        L"X-GitHub-Api-Version: 2022-11-28\r\n";
+    win(WinHttpSendRequest(h->request, kRequestHeaders,
+        static_cast<DWORD>((std::size(kRequestHeaders) - 1) * sizeof(wchar_t)), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE, "Update request failed");
     win(WinHttpReceiveResponse(h->request, nullptr) != FALSE, "Update response failed");
     if (!header(h->request, WINHTTP_QUERY_CONTENT_ENCODING).empty()) fail("Encoded HTTP response refused");
     DWORD status = 0, size = sizeof(status);
@@ -235,7 +239,9 @@ void fetch(const std::string& first, uint64_t limit, const Sink& sink, const std
         if (response.status != 200) fail("Update server returned unsuccessful HTTP status");
         std::optional<uint64_t> length;
         if (!response.length.empty()) { length = integer(response.length); if (*length > limit) fail("HTTP body exceeds size limit"); }
-        std::array<char, 65536> buffer{}; uint64_t count = 0;
+        // A 64 KB stack frame is half the default thread stack and is a real overflow risk
+        // in a plugin running on the host's thread; the buffer is on the heap instead.
+        std::vector<char> buffer(65536, 0); uint64_t count = 0;
         for (;;) { guard(); auto n = response.read(buffer.data(), buffer.size()); guard(); if (n > buffer.size() || n > limit - count) fail("HTTP body exceeds size limit"); if (!n) break; sink(buffer.data(), n); count += n; }
         if (length && count != *length) fail("Truncated/inconsistent HTTP body"); return;
     }
@@ -467,7 +473,7 @@ struct Cache {
 std::string file_hash(HANDLE h, uint64_t expected) {
     LARGE_INTEGER size{}; win(GetFileSizeEx(h, &size) != FALSE, "Cannot inspect cached installer size"); if (size.QuadPart < 0) fail("Cached installer has an invalid size");
     if (expected && static_cast<uint64_t>(size.QuadPart) != expected) fail("Cached installer size mismatch");
-    Hash hash; std::array<char, 65536> data{};
+    Hash hash; std::vector<char> data(65536, 0);
     for (;;) { DWORD n = 0; win(ReadFile(h, data.data(), static_cast<DWORD>(data.size()), &n, nullptr) != FALSE, "Cannot read cached installer"); if (!n) break; hash.add(data.data(), n); } return hash.finish();
 }
 std::filesystem::path download(const Candidate& c, const std::filesystem::path& directory, const std::atomic<bool>& stop) {
