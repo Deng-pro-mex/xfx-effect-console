@@ -567,6 +567,96 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-after-pages") {
+            // A live session opens the settings page, closes it, searches, applies, and only
+            // then drags. If any of those left the strip hidden or its rectangles stale, the
+            // drop hit-test finds nothing and the gesture silently does nothing - the exact
+            // "dragging never works" report. Walk the same sequence before dragging.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            g_state->settings.result_digit_shortcut = false;
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+
+            // 1. Open and close the settings page twice.
+            for (int round = 0; round < 2; ++round) {
+                SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+                pump_for(360);
+                SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+                pump_for(360);
+            }
+            // 2. Search, then clear, then search again (the row count changes each time).
+            for (const wchar_t* term : {L"gao", L"", L"gsmh", L"gao"}) {
+                SetWindowTextW(g_state->search, term);
+                SendMessageW(g_state->window, WM_COMMAND,
+                    MAKEWPARAM(kSearchId, EN_CHANGE), reinterpret_cast<LPARAM>(g_state->search));
+                pump_for(220);
+            }
+            // 3. Run an apply, which hides and re-shows the palette.
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 14 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            g_test_script_reply.reset();
+            pump_for(200);
+            if (!IsWindow(g_state->window)) { show_console(); pump_for(220); }
+            // The apply closes the palette on success; reopen and search again.
+            show_console();
+            pump_for(220);
+            SetWindowTextW(g_state->search, L"gao");
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSearchId, EN_CHANGE), reinterpret_cast<LPARAM>(g_state->search));
+            pump_for(260);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            // 4. NOW the drag has to work.
+            for (int slot = 0; slot < 9; ++slot) {
+                const HWND cell = g_state->slot_row_buttons[static_cast<size_t>(slot)];
+                assert(cell && IsWindow(cell));
+                assert(IsWindowVisible(cell));      // still on screen after all of that
+                RECT box{};
+                assert(GetWindowRect(cell, &box));
+                assert(box.right - box.left > 8 && box.bottom - box.top > 8);
+                const POINT centre{(box.left + box.right) / 2, (box.top + box.bottom) / 2};
+                assert(slot_row_cell_at(centre) == slot);
+            }
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            assert(SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON,
+                MAKELPARAM(12, row.top + 4)) == 0);
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[6], &cell));
+            g_test_drag_cursor = POINT{(cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2};
+            g_test_drag_button_held = false;
+            for (int tick = 0; tick < 8 && g_state->result_drag_armed; ++tick) {
+                handle_drag_poll();
+                pump_for(30);
+            }
+            g_test_drag_cursor.reset();
+            g_test_drag_button_held.reset();
+            pump_for(150);
+            std::cout << "  after settings/apply/search: slot7="
+                      << (g_state->settings.row_slots[6].empty() ? "EMPTY" : "bound") << "\n";
+            assert(!g_state->settings.row_slots[6].empty());
+            assert(xfx::SettingsStore::load(g_test_settings_path).row_slots[6] ==
+                g_state->settings.row_slots[6]);
+            std::cout << "PASS dragging still binds after settings, apply and repeated searches\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--search-resize") {
             // Reported from a live screenshot: typing narrowed the results to three rows but
             // the window kept its eight-row height, leaving a large empty band above the
