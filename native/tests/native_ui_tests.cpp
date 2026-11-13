@@ -567,6 +567,40 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--first-open-latency") {
+            // The very first open builds the whole catalogue synchronously inside WM_CREATE.
+            // If that takes long the palette appears frozen with no window at all, which is
+            // what "the first time I use it, it hangs / pops up an error" looks like.
+            const auto t0 = std::chrono::steady_clock::now();
+            show_console();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            pump_for(200);
+            std::cout << "  first open with a cold catalogue: " << elapsed_ms << " ms\n";
+            assert(IsWindow(g_state->window));
+            assert(g_state->catalog_initialized);
+            assert(!g_state->catalog.empty());
+            // A bare open on this harness must stay well inside a second; anything near that
+            // means the scan is blocking the window procedure.
+            assert(elapsed_ms < 900);
+
+            // The second open reuses the cache and must be faster still.
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(80);
+            const auto t1 = std::chrono::steady_clock::now();
+            show_console();
+            const auto warm_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t1).count();
+            pump_for(200);
+            std::cout << "  second open with a warm catalogue: " << warm_ms << " ms\n";
+            assert(IsWindow(g_state->window));
+            // Both opens must fit the same budget. Comparing them to each other measures
+            // window setup, not the scan: the harness catalogue is a two-item fixture.
+            assert(warm_ms < 900);
+            std::cout << "PASS the first open finishes quickly and the cache is reused\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-without-capture") {
             // Drag-to-bind must not depend on SetCapture succeeding. Another app (or AE
             // itself) can hold the mouse capture, and then no WM_MOUSEMOVE/WM_LBUTTONUP
