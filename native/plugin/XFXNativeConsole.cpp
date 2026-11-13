@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.56";
+constexpr char kProductVersion[] = "1.5.57";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -661,6 +661,9 @@ struct PluginState {
     HWND slot_row_hint = nullptr;
     HWND result_digit_key = nullptr;
     HWND result_digit_hint = nullptr;
+    // Row count of the last populate, so the search handler can tell a real change in the
+    // result height from a keystroke that keeps the same number of rows.
+    int last_result_rows = -1;
     HWND results = nullptr;
     HWND refresh = nullptr;
     HWND hotkey_combo = nullptr;
@@ -2480,6 +2483,7 @@ void populate_results(bool resize_window, bool update_status) {
     }
     const LRESULT result_count = SendMessageW(g_state->results, LB_GETCOUNT, 0, 0);
     if (result_count > 0) SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+    if (g_state) g_state->last_result_rows = static_cast<int>(result_count);
     if (resize_window || list_style_changed) adjust_console_height();
     if (update_status)
         set_status(result_count == 0 ? L"没有找到匹配项目" : L"Enter 应用 · Tab 切换效果/预设 · 右键编辑");
@@ -5959,8 +5963,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             // Keep the palette height and status line stable while typing.
             // Rebuilding an owner-drawn list and resizing the topmost window
             // for every character is the source of the visible AE flicker.
+            // Resizing once, when the number of ROWS changes, keeps both: typing within the
+            // same row count costs nothing, and a narrowing search no longer leaves the
+            // eight-row height with three rows in it - which is the empty band users see.
             SearchRedrawGuard redraw(hwnd);
+            const int rows_before = g_state->last_result_rows;
             populate_results(false, false);
+            if (g_state->last_result_rows != rows_before) {
+                adjust_console_height();
+                layout_controls(hwnd);
+            }
             return 0;
         }
         if (LOWORD(wparam) == kFilterId && HIWORD(wparam) == CBN_SELCHANGE) {

@@ -567,6 +567,71 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--search-resize") {
+            // Reported from a live screenshot: typing narrowed the results to three rows but
+            // the window kept its eight-row height, leaving a large empty band above the
+            // strip. The search handler skipped the resize to avoid flicker and never did it
+            // at all.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            SetWindowTextW(g_state->search, L"");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(260);
+            const auto height_of = [](HWND window) {
+                RECT r{}; GetWindowRect(window, &r); return r.bottom - r.top;
+            };
+            const int empty_height = height_of(g_state->window);
+            const int empty_rows = g_state->last_result_rows;
+            std::cout << "  empty search: rows=" << empty_rows
+                      << " height=" << empty_height << "\n";
+
+            // Type a term that narrows the list, through the real EN_CHANGE path.
+            SetWindowTextW(g_state->search, L"gao");
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSearchId, EN_CHANGE), reinterpret_cast<LPARAM>(g_state->search));
+            pump_for(320);
+            const int typed_height = height_of(g_state->window);
+            const int typed_rows = g_state->last_result_rows;
+            std::cout << "  after typing: rows=" << typed_rows
+                      << " height=" << typed_height << "\n";
+            assert(typed_rows >= 1);
+            assert(typed_rows != empty_rows || typed_height == empty_height);
+
+            // The window must follow the row count, and the list must fill the space it has
+            // rather than leaving an empty band above the strip.
+            RECT list{};
+            assert(GetWindowRect(g_state->results, &list));
+            RECT window{};
+            assert(GetWindowRect(g_state->window, &window));
+            const int list_height = list.bottom - list.top;
+            const double scale = GetDpiForWindow(g_state->window) / 96.0;
+            const int expected_rows_height = static_cast<int>(
+                (std::min)(typed_rows, 8) * kResultHeight * scale);
+            std::cout << "  list height=" << list_height
+                      << " expected~=" << expected_rows_height << "\n";
+            // The list may be taller than its rows only while the strip is hidden; with the
+            // strip on, the list must not reserve the empty band.
+            assert(list_height <= static_cast<int>(8 * kResultHeight * scale) + 8);
+
+            // A term that matches nothing must shrink to the minimum, not keep the band.
+            SetWindowTextW(g_state->search, L"zzzzzzzz");
+            SendMessageW(g_state->window, WM_COMMAND,
+                MAKEWPARAM(kSearchId, EN_CHANGE), reinterpret_cast<LPARAM>(g_state->search));
+            pump_for(320);
+            const int none_rows = g_state->last_result_rows;
+            const int none_height = height_of(g_state->window);
+            std::cout << "  no matches: rows=" << none_rows
+                      << " height=" << none_height << "\n";
+            assert(none_rows == 0);
+            assert(none_height <= typed_height);
+            assert(none_height <= empty_height);
+
+            std::cout << "PASS the palette height follows the number of result rows\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--acceptance") {
             // One end-to-end pass over the five reported problems, in the order a user
             // meets them. Each block fails on its own so the output names the broken one.
