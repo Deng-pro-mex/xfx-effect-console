@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.54";
+constexpr char kProductVersion[] = "1.5.55";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -3712,6 +3712,9 @@ void apply_imported_settings(const xfx::Settings& imported) {
     select_hotkey_choice(g_state->settings.hotkey);
     SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
                  static_cast<int>(g_state->settings.ime_mode), 0);
+    SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
+                 g_state->settings.show_slot_row
+                     ? modifier_combo_index(g_state->settings.slot_row_modifier) : 0, 0);
     SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
                  g_state->settings.result_digit_shortcut
                      ? modifier_combo_index(g_state->settings.result_digit_modifier) : 0, 0);
@@ -4020,12 +4023,17 @@ void save_settings() {
     // Diagnostics are always on: a failure on a machine we cannot inspect must leave
     // evidence behind, so there is no user switch for this.
     updated.diagnostic_logging = true;
-    // The two shortcut dropdowns are authoritative; keep the flags in sync so an
-    // imported file cannot enable a group the dropdown shows as off.
-    const auto slot_choice = SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0);
-    if (slot_choice >= 0) updated.show_slot_row = slot_choice != 0;
-    const auto digit_choice = SendMessageW(g_state->result_digit_key, CB_GETCURSEL, 0, 0);
-    if (digit_choice >= 0) updated.result_digit_shortcut = digit_choice != 0;
+    // The two shortcut dropdowns are the authority ONLY while the settings page that owns
+    // them is on screen. Reading them unconditionally meant a save triggered from anywhere
+    // else (closing the palette, applying an effect, importing a config) could overwrite the
+    // stored value with whatever the control happened to show - including "关闭" for a strip
+    // the user had switched on.
+    if (g_state->settings_visible) {
+        const auto slot_choice = SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0);
+        if (slot_choice >= 0) updated.show_slot_row = slot_choice != 0;
+        const auto digit_choice = SendMessageW(g_state->result_digit_key, CB_GETCURSEL, 0, 0);
+        if (digit_choice >= 0) updated.result_digit_shortcut = digit_choice != 0;
+    }
     try { xfx::SettingsStore::save(settings_path(), updated); }
     catch (...) {
         throw;
@@ -5866,6 +5874,23 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (LOWORD(wparam) == kPreferencesId) {
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
+            if (g_state->settings_visible) {
+                // The page is a VIEW of the stored settings. Entering it must show what is
+                // actually saved; otherwise a rejected choice or an imported file leaves a
+                // stale selection on screen that the next save would write back.
+                SendMessageW(g_state->slot_row_key, CB_SETCURSEL,
+                    g_state->settings.show_slot_row
+                        ? modifier_combo_index(g_state->settings.slot_row_modifier) : 0, 0);
+                SendMessageW(g_state->result_digit_key, CB_SETCURSEL,
+                    g_state->settings.result_digit_shortcut
+                        ? modifier_combo_index(g_state->settings.result_digit_modifier) : 0, 0);
+                SendMessageW(g_state->ime_mode_combo, CB_SETCURSEL,
+                    static_cast<int>(g_state->settings.ime_mode), 0);
+                SendMessageW(g_state->light_theme, CB_SETCURSEL,
+                    static_cast<int>(g_state->settings.theme_mode), 0);
+                select_hotkey_choice(g_state->settings.hotkey);
+                refresh_shortcut_choice_labels();
+            }
             RECT client{}; GetClientRect(hwnd,&client);
             const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 378 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;

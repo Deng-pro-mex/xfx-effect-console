@@ -567,6 +567,145 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--acceptance") {
+            // One end-to-end pass over the five reported problems, in the order a user
+            // meets them. Each block fails on its own so the output names the broken one.
+            show_console();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+            assert(IsWindow(g_state->window));
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            g_state->settings.result_digit_shortcut = false;
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+
+            // (1) Dragging a result onto the second strip binds that cell.
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON,
+                MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[2], &cell));
+            const POINT drop{(cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2};
+            g_test_drag_cursor = drop;
+            g_test_drag_button_held = false;
+            for (int tick = 0; tick < 8 && g_state->result_drag_armed; ++tick) {
+                handle_drag_poll();
+                pump_for(30);
+            }
+            g_test_drag_cursor.reset();
+            g_test_drag_button_held.reset();
+            pump_for(120);
+            std::cout << "  [1] drag bind -> slot3 " << (g_state->settings.row_slots[2].empty() ? "FAILED" : "ok") << "\n";
+            assert(!g_state->settings.row_slots[2].empty());
+            const auto dragged_key = g_state->settings.row_slots[2];
+
+            // (2) Shift + digit binds a selected result to the row, without a drag.
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_test_keyboard_modifiers = static_cast<UINT>(MOD_SHIFT);
+            SetFocus(g_state->results);
+            SendMessageW(g_state->results, WM_KEYDOWN, '7', 0);
+            pump_for(80);
+            g_test_keyboard_modifiers.reset();
+            std::cout << "  [2] Shift+7 bind -> slot7 " << (g_state->settings.row_slots[6].empty() ? "FAILED" : "ok") << "\n";
+            assert(!g_state->settings.row_slots[6].empty());
+            assert(g_state->settings.row_slots[6] == dragged_key);
+
+            std::cout << "  [diag] after step2: show_slot_row=" << (g_state->settings.show_slot_row ? 1 : 0)
+                      << " combo=" << (int)SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0)
+                      << " count=" << (int)SendMessageW(g_state->slot_row_key, CB_GETCOUNT, 0, 0) << "\n";
+            // (3) Every dropdown is dark and rounded, closed and open.
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(360);
+            std::cout << "  [diag] after settings open: show_slot_row=" << (g_state->settings.show_slot_row ? 1 : 0)
+                      << " combo=" << (int)SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0)
+                      << " count=" << (int)SendMessageW(g_state->slot_row_key, CB_GETCOUNT, 0, 0) << "\n";
+            for (int id : {kFilterId, kLightThemeId, kImeModeId,
+                           kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId}) {
+                const HWND combo = GetDlgItem(g_state->window, id);
+                assert(combo && IsWindowVisible(combo));
+                RECT face{};
+                assert(GetWindowRect(combo, &face));
+                const int w = face.right - face.left, h = face.bottom - face.top;
+                HDC screen = GetDC(nullptr);
+                HDC memory = CreateCompatibleDC(screen);
+                HBITMAP shot = CreateCompatibleBitmap(screen, w, h);
+                const auto previous = SelectObject(memory, shot);
+                BitBlt(memory, 0, 0, w, h, screen, face.left, face.top, SRCCOPY);
+                long white = 0, total = 0;
+                for (int y = 0; y < h; y += 2)
+                    for (int x = 0; x < w; x += 2) {
+                        const COLORREF pixel = GetPixel(memory, x, y);
+                        if (pixel == CLR_INVALID) continue;
+                        ++total;
+                        if (GetRValue(pixel) > 235 && GetGValue(pixel) > 235 &&
+                            GetBValue(pixel) > 235) ++white;
+                    }
+                SelectObject(memory, previous);
+                DeleteObject(shot); DeleteDC(memory); ReleaseDC(nullptr, screen);
+                assert(total > 0);
+                // The closed face follows the theme, so it must not be a bright system box.
+                std::cout << "  [3] combo id=" << id << " white="
+                          << (white * 100 / total) << "%\n";
+                assert(white * 100 / total < 40);
+            }
+
+            // (4) The first apply after startup waits instead of raising AE's dialog.
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(300);
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(160);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            const int dialogs_before = g_test_message_box_count;
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            g_test_force_modal = true;
+            execute_selected();
+            for (int tick = 0; tick < 8; ++tick) { run_pending_apply_on_idle(); pump_for(30); }
+            assert(!g_pending_applies.empty());
+            assert(g_test_last_script.empty());
+            g_test_force_modal = false;
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            bool ran = false;
+            for (int tick = 0; tick < 14 && !ran; ++tick) ran = run_pending_apply_on_idle();
+            g_test_script_reply.reset();
+            pump_for(160);
+            std::cout << "  [4] first apply waited then ran=" << (ran ? 1 : 0)
+                      << " dialogs=" << (g_test_message_box_count - dialogs_before) << "\n";
+            assert(ran);
+            assert(g_test_message_box_count == dialogs_before);
+
+            // (5) The bindings survived on disk through all of the above.
+            const auto saved = xfx::SettingsStore::load(g_test_settings_path);
+            std::cout << "  [5] saved show_slot_row=" << (saved.show_slot_row ? 1 : 0)
+                      << " modifier=" << wide_to_utf8(saved.slot_row_modifier.c_str())
+                      << " slot7=" << (saved.row_slots[6].empty() ? "empty" : "bound")
+                      << " live show_slot_row=" << (g_state->settings.show_slot_row ? 1 : 0)
+                      << " combo=" << (int)SendMessageW(g_state->slot_row_key, CB_GETCURSEL, 0, 0)
+                      << "\n";
+            assert(saved.row_slots[6] == dragged_key);
+            assert(saved.show_slot_row);
+
+            std::cout << "PASS all five reported problems are fixed in one end-to-end pass\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--theme-contrast") {
             // Light mode shades the palette from the HOST background. If the host reports a
             // mid-grey the derived surface can land on the text colour, and the panel turns
