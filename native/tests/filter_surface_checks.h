@@ -74,7 +74,10 @@ static void check_filter_background_transitions(const fs::path& artifacts={}) {
         RECT window{};GetWindowRect(g_state->window,&window);
         const int rows=selection==3?static_cast<int>(g_state->settings.favorites.size()):8;
         const int strip=g_state->settings.show_slot_row?kSlotRowHeight:0;
-        assert(client.bottom==ui_px(56+rows*kResultHeight+strip+kLayerStyleRowHeight+22));
+        // With results on screen both bound-slot rows are shown, so the strip is counted
+        // twice: the fixed first strip plus the optional second one.
+        assert(client.bottom==ui_px(56+rows*kResultHeight+strip+kSlotStripRowHeight+
+            kLayerStyleRowHeight+22));
         assert(window.bottom-window.top==client.bottom);
     };
     for(auto mode:{xfx::ThemeMode::Dark,xfx::ThemeMode::Light}){

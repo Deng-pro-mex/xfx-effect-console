@@ -53,6 +53,31 @@ struct MenuItem {
 };
 struct MenuBackground { HMENU menu{}; HBRUSH original{}; bool changed = false; };
 
+// Applies the console's rounded corner to every popup menu window of this thread that is
+// currently open. Called from WM_INITMENUPOPUP: at that moment a nested submenu window
+// exists but has not painted its frame yet, so the shape costs no visible repaint.
+void round_open_menu_windows() {
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM) -> BOOL {
+        wchar_t name[32]{};
+        if (!GetClassNameW(window, name, 32)) return TRUE;
+        if (wcscmp(name, L"#32768") != 0) return TRUE;
+        if (!IsWindowVisible(window)) return TRUE;
+        RECT bounds{};
+        if (!GetWindowRect(window, &bounds)) return TRUE;
+        const int width = bounds.right - bounds.left;
+        const int height = bounds.bottom - bounds.top;
+        if (width <= 0 || height <= 0) return TRUE;
+        const int dpi = GetDpiForWindow(window);
+        const int radius = MulDiv(6, dpi ? dpi : 96, 96);
+        RECT existing{};
+        if (GetWindowRgnBox(window, &existing) != ERROR && existing.right - existing.left == width &&
+            existing.bottom - existing.top == height) return TRUE;
+        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+        if (region && !SetWindowRgn(window, region, FALSE)) DeleteObject(region);
+        return TRUE;
+    }, 0);
+}
+
 class PopupSession {
 public:
     PopupSession(HWND owner, const ThemeColors& colors, HFONT font, const MenuActionRows& actions = {}, UINT flags = 0)
@@ -579,6 +604,13 @@ private:
             return DefSubclassProc(hwnd, message, wparam, lparam);
         }
         try {
+            if (message == WM_INITMENUPOPUP) {
+                // A popup menu's frame belongs to the system class ("#32768"): square and
+                // system-coloured, which is what made the second and third level panels look
+                // foreign. Their windows exist for exactly the lifetime of the popup, so
+                // shape them here, each time one appears.
+                round_open_menu_windows();
+            }
             if (top_ == self && message == WM_INITMENUPOPUP && self->visited_.count(reinterpret_cast<HMENU>(wparam))) {
                 const auto menu = reinterpret_cast<HMENU>(wparam);
                 self->visible_.erase(std::remove(self->visible_.begin(), self->visible_.end(), menu), self->visible_.end());

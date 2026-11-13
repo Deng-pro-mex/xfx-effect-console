@@ -82,6 +82,10 @@ constexpr int kRefreshId = 1005;
 constexpr int kImeModeId = 1008;
 // Nine optional favourites buttons in their own strip.
 constexpr int kSlotRowFirstId = 1060;
+// The FIRST strip (Ctrl+1..9). It is a permanent row above the second strip, so both rows
+// are on screen at once with a search running - the report was that row 1 disappears as
+// soon as results exist.
+constexpr int kSlotFirstId = 1080;
 constexpr int kSlotRowToggleId = 1070;
 constexpr int kSlotRowKeyId = 1071;
 constexpr int kSlotRowHintId = 1072;
@@ -131,10 +135,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.65";
+constexpr char kProductVersion[] = "1.5.66";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
+// Height of each of the two bound-slot rows (first strip + second strip).
+constexpr int kSlotStripRowHeight = 44;
 // Room for the results digit-shortcut row added above the update entry.
 constexpr int kSettingsHeight = 320;
 constexpr int kResultHeight = 28;
@@ -653,6 +659,7 @@ struct PluginState {
     RECT search_surface_bounds{};
     std::array<HWND, 9> layer_style_buttons{};
     std::array<HWND, 9> slot_row_buttons{};
+    std::array<HWND, 9> slot_buttons{};
     HWND slot_row_caption = nullptr;
     HWND library_caption = nullptr;
     HWND ime_caption = nullptr;
@@ -741,6 +748,7 @@ struct PluginState {
     // Dragging a search result onto the second strip binds it there. Kept separate from
     // result_click_pending so a drag never turns into an apply.
     bool result_drag_armed = false;
+    HWND drag_ghost = nullptr;
     int result_drag_row = -1;
     int result_drag_target = -1;
     bool initial_background_primed = false;
@@ -1061,6 +1069,7 @@ UINT current_hotkey_modifiers() {
 }
 
 void update_trace(const std::string& text, bool always = false);
+std::wstring item_display_label(const xfx::CatalogItem& item);
 
 // Index of the second-strip cell under the given screen point, or -1.
 void set_status(const std::wstring& message, bool success = false);
@@ -1115,6 +1124,105 @@ bool pointer_cursor_position(POINT& cursor) {
     return GetCursorPos(&cursor) != FALSE;
 }
 
+// Small floating label that follows the cursor during a drag. Without it the gesture is
+// invisible until the drop: the list highlight is under the pointer, so nothing appears to
+// move. It is a layered-free popup painted here, never activated, never focusable.
+void destroy_drag_ghost() {
+    if (g_state && g_state->drag_ghost && IsWindow(g_state->drag_ghost)) {
+        DestroyWindow(g_state->drag_ghost);
+    }
+    if (g_state) g_state->drag_ghost = nullptr;
+}
+
+void paint_drag_ghost(HWND window, HDC dc) {
+    RECT client{};
+    GetClientRect(window, &client);
+    const auto& c = colors();
+    HBRUSH background = CreateSolidBrush(c.background);
+    FillRect(dc, &client, background);
+    DeleteObject(background);
+    RECT card = client;
+    InflateRect(&card, -1, -1);
+    xfx::paint_round_rect(dc, card, c.selected, static_cast<float>(ui_px(5)), std::nullopt);
+    wchar_t text[256]{};
+    GetWindowTextW(window, text, 256);
+    if (g_state && g_state->font) SelectObject(dc, g_state->font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, c.selected_text);
+    RECT label = card;
+    label.left += ui_px(8); label.right -= ui_px(8);
+    DrawTextW(dc, text, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+LRESULT CALLBACK drag_ghost_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        paint_drag_ghost(hwnd, dc);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    if (message == WM_ERASEBKGND) return 1;
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+// Creates (once) and positions the ghost under the pointer. The text is the result being
+// dragged plus the cell it would land on, so the operation is readable in place.
+void update_drag_ghost(int target) {
+    if (!g_state || !g_state->result_drag_armed) { destroy_drag_ghost(); return; }
+    POINT cursor{};
+    if (!pointer_cursor_position(cursor)) return;
+    if (!IsWindow(g_state->drag_ghost)) {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = drag_ghost_proc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"XFXDragGhostWindow";
+        RegisterClassExW(&wc);
+        g_state->drag_ghost = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT |
+            WS_EX_TOOLWINDOW, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        if (!g_state->drag_ghost) return;
+    }
+    std::wstring text;
+    if (g_state->result_drag_row >= 0) {
+        const LRESULT data = SendMessageW(g_state->results, LB_GETITEMDATA,
+            g_state->result_drag_row, 0);
+        if (data != LB_ERR && data != 0) {
+            const auto* item = reinterpret_cast<const xfx::CatalogItem*>(data);
+            if (item) text = item_display_label(*item);
+        }
+    }
+    if (text.empty()) text = L"拖动中";
+    if (target >= 0) text += L"  →  第 " + std::to_wstring(target + 1) + L" 格";
+    // The ghost is measuring against its own text, so size it from the same font the
+    // console uses and let the label rule above handle the ellipsis.
+    HDC dc = GetDC(g_state->window);
+    int text_width = 120;
+    if (dc) {
+        const HGDIOBJ previous = g_state->font ? SelectObject(dc, g_state->font) : nullptr;
+        SIZE measured{};
+        if (GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &measured))
+            text_width = measured.cx;
+        if (previous) SelectObject(dc, previous);
+        ReleaseDC(g_state->window, dc);
+    }
+    const int dpi = GetDpiForWindow(g_state->window);
+    const int width = (std::min)(MulDiv(260, dpi, 96), text_width + MulDiv(20, dpi, 96));
+    const int height = MulDiv(24, dpi, 96);
+    // Offset from the pointer so the ghost never sits under the cursor hotspot.
+    const int x = cursor.x + MulDiv(14, dpi, 96);
+    const int y = cursor.y + MulDiv(14, dpi, 96);
+    SetWindowPos(g_state->drag_ghost, HWND_TOPMOST, x, y, width, height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowTextW(g_state->drag_ghost, text.c_str());
+    InvalidateRect(g_state->drag_ghost, nullptr, FALSE);
+    UpdateWindow(g_state->drag_ghost);
+}
+
+void destroy_drag_ghost();
+void update_drag_ghost(int target);
+
 void update_result_drag_target() {
     if (!g_state) return;
     POINT cursor{};
@@ -1130,9 +1238,12 @@ void update_result_drag_target() {
     // Tell the user what will happen when they let go. Without this a drag that is working
     // looks exactly like one that is not: nothing changes until the drop.
     if (target >= 0)
-        set_status(L"松开鼠标绑定到第二行第 " + std::to_wstring(target + 1) + L" 格");
+        set_status(L"松开鼠标绑定到第 " + std::to_wstring(target + 1) + L" 格（正在拖动）", true);
     else if (g_state->result_drag_armed)
-        set_status(L"把结果拖到第二行的格子上再松手");
+        set_status(L"正在拖动：把结果拖到下面的快捷栏格子上再松手");
+    // A ghost label follows the cursor so the gesture is visible even when the pointer is
+    // far from both strips.
+    update_drag_ghost(target);
     repaint_slot_row_cells();
 }
 
@@ -1432,11 +1543,12 @@ inline constexpr std::array<ShortcutChoice, 6> kShortcutChoices{{
 // host, the IME and whether RegisterHotKey still owned the combination, which is why the
 // shortcut could be changed on one attempt and silently rejected on the next. A list has
 // one code path and states its outcome immediately.
-inline constexpr std::array<const wchar_t*, 10> kHotkeyChoices{{
+inline constexpr std::array<const wchar_t*, 11> kHotkeyChoices{{
     L"Ctrl+Space",
     L"Ctrl+Shift+Space",
     L"Ctrl+Alt+Space",
     L"Alt+Space",
+    L"Shift+Space",
     L"Ctrl+Shift+A",
     L"Ctrl+Alt+A",
     L"Ctrl+Shift+E",
@@ -1818,6 +1930,7 @@ void handle_drag_poll() {
                 g_state->result_drag_row = -1;
                 g_state->result_drag_target = -1;
                 repaint_slot_row_cells();
+                destroy_drag_ghost();
                 if (list && GetCapture() == list) ReleaseCapture();
                 if (g_state->result_click_redraw_held) {
                     g_state->result_click_redraw_held = false;
@@ -1835,6 +1948,7 @@ void handle_drag_poll() {
         g_state->result_drag_row = -1;
         g_state->result_drag_target = -1;
         repaint_slot_row_cells();
+        destroy_drag_ghost();
         if (list && GetCapture() == list) ReleaseCapture();
         if (g_state->result_click_redraw_held) {
             g_state->result_click_redraw_held = false;
@@ -4020,7 +4134,7 @@ void assign_row_slot_dragged(int slot, int row) {
     g_state->settings = std::move(updated);
     const auto label = item_display_label(*item);
     update_trace("drag-bind slot=" + std::to_string(slot) + " row=" + std::to_string(row));
-    set_status(L"已把「" + label + L"」绑定到第二行快捷栏 " + std::to_wstring(slot + 1), true);
+    set_status(L"已把「" + label + L"」绑定到第二行第 " + std::to_wstring(slot + 1) + L" 格", true);
     // The cell is ownerdraw and reads the settings when it paints. Saving alone changes
     // nothing on screen, which is why a successful drag looked like no bind at all.
     repaint_slot_row_cells();
@@ -4108,7 +4222,7 @@ void assign_slot(int slot) {
     xfx::SettingsStore::save(settings_path(), updated);
     g_state->settings = std::move(updated);
     wchar_t message[128] = {};
-    swprintf_s(message, L"已将当前项目绑定到快捷槽 Ctrl+%d", slot + 1);
+    swprintf_s(message, L"已绑定到第一行快捷栏第 %d 格", slot + 1);
     populate_results();
     set_status(message,true);
 }
@@ -4591,8 +4705,11 @@ void adjust_console_height() {
     const int style_part = g_state->settings_visible ? 0 : kLayerStyleRowHeight;
     const int favourites_part = (!g_state->settings_visible && g_state->settings.show_slot_row)
         ? kSlotRowHeight : 0;
+    // The first strip is always on screen while searching, so its row is always reserved.
+    const int first_strip_part =
+        (g_state->settings_visible || shortcut_list_mode()) ? 0 : kSlotStripRowHeight;
     RECT desired{0, 0, client.right, static_cast<LONG>((56 + list_part + style_part +
-        favourites_part + 22 + g_state->settings_extent)*scale)};
+        favourites_part + first_strip_part + 22 + g_state->settings_extent)*scale)};
     AdjustWindowRectEx(&desired, style, FALSE, GetWindowLongW(hwnd, GWL_EXSTYLE));
     int height = desired.bottom - desired.top;
     RECT current{}; GetWindowRect(hwnd, &current);
@@ -4699,10 +4816,14 @@ void layout_controls(HWND hwnd) {
     const int footer = g_state->settings_visible ? 56
                                                  : height - 22 - g_state->settings_extent;
     const int styles_top = footer - kLayerStyleRowHeight;
-    // Optional favourites strip sits directly above the style row.
+    // Both bound-slot rows sit directly above the style row. The first strip (Ctrl+1..9)
+    // is always shown; the second strip stays optional.
+    const bool first_strip = !g_state->settings_visible && !shortcut_list_mode();
     const bool favourites_row = g_state->settings.show_slot_row && !g_state->settings_visible;
     const int slot_row_height = favourites_row ? kSlotRowHeight : 0;
+    const int first_strip_height = first_strip ? kSlotStripRowHeight : 0;
     const int slot_row_top = styles_top - slot_row_height;
+    const int first_strip_top = slot_row_top - first_strip_height;
     if (g_state->settings_visible) {
         // The settings page is its own surface. Leaving the result list visible above it
         // makes the page look like a leftover panel stacked under a search UI.
@@ -4710,7 +4831,20 @@ void layout_controls(HWND hwnd) {
     } else {
         ShowWindow(g_state->results, SW_SHOWNA);
         move(g_state->results, margin, 56, inner,
-             (std::max)(kResultHeight, slot_row_top - 56));
+             (std::max)(kResultHeight, first_strip_top - 56));
+    }
+    if (first_strip) {
+        for (size_t index = 0; index < g_state->slot_buttons.size(); ++index) {
+            const int left = margin + static_cast<int>(index) * inner / 9;
+            const int right = margin + static_cast<int>(index + 1) * inner / 9;
+            move(g_state->slot_buttons[index], left, first_strip_top + 2, right - left,
+                 kShortcutHeight);
+            ShowWindow(g_state->slot_buttons[index], SW_SHOWNA);
+            apply_button_region(g_state->slot_buttons[index]);
+            InvalidateRect(g_state->slot_buttons[index], nullptr, FALSE);
+        }
+    } else {
+        for (HWND button : g_state->slot_buttons) ShowWindow(button, SW_HIDE);
     }
     if (favourites_row) {
         for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
@@ -4838,25 +4972,53 @@ void layout_controls(HWND hwnd) {
 
 void draw_toolbar_icon(HDC dc,const RECT& rect,int id) {
     Gdiplus::Graphics g(dc);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    const float scale=(rect.right-rect.left)/40.0f;
+    const float scale=(rect.right-rect.left)/34.0f;
     g.TranslateTransform((rect.left+rect.right)*.5f,(rect.top+rect.bottom)*.5f);g.ScaleTransform(scale,scale);
     const HWND button=GetDlgItem(g_state->window,id);
     const bool disabled=!IsWindowEnabled(button),selected=id==kPreferencesId && g_state->settings_visible;
     const auto found=g_state->button_hovers.find(button);
     const bool hovered=found!=g_state->button_hovers.end() && found->second.hovered;
     const auto ink=disabled?colors().disabled:selected?colors().selected_text:hovered?colors().text:colors().icon;
-    Gdiplus::Pen pen(vector_color(ink),1.5f);
+    const auto accent=disabled?colors().disabled:selected?colors().selected_text:colors().accent;
+    Gdiplus::Pen pen(vector_color(ink),1.7f);
     pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);pen.SetLineJoin(Gdiplus::LineJoinRound);
-    // Every symbol fits the same 18px ink box, including its 1.5px stroke.
+    Gdiplus::SolidBrush solid(vector_color(ink));
+    Gdiplus::SolidBrush mark(vector_color(accent));
+    // Every glyph fills the same 16px box (+/-8) so the three toolbar buttons optically
+    // weigh the same, and each one carries exactly one accent detail.
     if(id==kCaptureId) {
-        g.DrawRectangle(&pen,-8.25f,-4.25f,16.5f,11.5f);g.DrawRectangle(&pen,-4.25f,-7.25f,7.5f,3.0f);
-        g.DrawEllipse(&pen,-3.0f,-2.0f,6.0f,6.0f);
+        // Camera: rounded body, viewfinder bump, one filled lens ring.
+        g.DrawRectangle(&pen,-8.0f,-3.5f,16.0f,10.5f);
+        g.DrawRectangle(&pen,-4.0f,-6.5f,7.0f,3.0f);
+        g.FillEllipse(&solid,-2.75f,-1.75f,5.5f,5.5f);
+        g.FillEllipse(&mark,-1.05f,-0.05f,2.1f,2.1f);
+        g.FillRectangle(&mark,5.25f,-2.25f,1.75f,1.75f);
     } else if(id==kSlotId) {
-        for(int y=0;y<3;++y)for(int x=0;x<3;++x)g.DrawRectangle(&pen,-8.25f+x*6,-8.25f+y*6,4.5f,4.5f);
+        // Nine slots: the four corner cells stay outlines, the centre one is filled with
+        // the accent so the grid reads as "a shortcut matrix with one active cell".
+        for(int y=0;y<3;++y)for(int x=0;x<3;++x){
+            const float left=-8.0f+x*5.6f,top=-8.0f+y*5.6f;
+            if(x==1&&y==1){g.FillRectangle(&mark,left,top,4.2f,4.2f);}
+            else g.DrawRectangle(&pen,left,top,4.2f,4.2f);
+        }
     } else if(id==kPreferencesId) {
+        // Gear: eight teeth as one polygon so the silhouette stays crisp at 18px.
         Gdiplus::PointF points[32];
-        for(int n=0;n<32;++n){const float angle=(n-.5f)*3.14159265f/16,r=(n%4==1 || n%4==2)?8.25f:6.25f;points[n]={std::cos(angle)*r,std::sin(angle)*r};}
-        g.DrawPolygon(&pen,points,32);g.DrawEllipse(&pen,-2.75f,-2.75f,5.5f,5.5f);
+        for(int n=0;n<32;++n){
+            const float angle=(n-.5f)*3.14159265f/16;
+            const float r=(n%4==1||n%4==2)?8.0f:6.0f;
+            points[n]={std::cos(angle)*r,std::sin(angle)*r};
+        }
+        g.FillPolygon(&mark,points,32);
+        g.FillEllipse(&solid,0,0,0,0);
+        // Punch the hub back out in the surface the button is actually painted on, then
+        // ring it, so the gear reads as a ringed hub rather than a solid blob.
+        const HWND host=GetDlgItem(g_state->window,id);
+        const COLORREF face=selected?colors().selected
+            :hovered?button_background_color(host,colors().button):colors().button;
+        Gdiplus::SolidBrush hole(vector_color(face));
+        g.FillEllipse(&hole,-2.6f,-2.6f,5.2f,5.2f);
+        g.DrawEllipse(&pen,-2.6f,-2.6f,5.2f,5.2f);
     }
 }
 
@@ -4932,6 +5094,20 @@ LRESULT CALLBACK combo_face_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, 
         if (message == WM_PAINT) EndPaint(hwnd, &paint);
         return 0;
     }
+    if (message == WM_SIZE || message == WM_WINDOWPOSCHANGED || message == WM_SETFONT) {
+        RECT box{};
+        if (GetClientRect(hwnd, &box)) {
+            const int width = box.right - box.left, height = box.bottom - box.top;
+            const int radius = MulDiv(5, GetDpiForWindow(hwnd), 96);
+            RECT existing{};
+            if (width > radius * 2 && height > radius * 2 &&
+                !(GetWindowRgnBox(hwnd, &existing) != ERROR &&
+                  existing.right - existing.left == width && existing.bottom - existing.top == height)) {
+                HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+                if (region && !SetWindowRgn(hwnd, region, FALSE)) DeleteObject(region);
+            }
+        }
+    }
     const auto result = DefSubclassProc(hwnd, message, wp, lp);
     // Native ComboBox draws directly during these messages, including its own arrow and
     // focus frame, so the custom face must be complete before returning. Opening the list
@@ -4999,7 +5175,7 @@ void size_combo_popup(HWND combo) {
 
 // Clips a dropdown popup to a rounded rectangle. The rows and the closed face are
 // already rounded; without this the list window itself still had square corners.
-void round_combo_popup(HWND popup) {
+void round_combo_popup(HWND popup, bool redraw = true) {
     if (!popup || !IsWindow(popup)) return;
     // SetWindowRgn can repaint the popup, which re-enters the resize path that calls this.
     static thread_local bool inside = false;
@@ -5020,8 +5196,11 @@ void round_combo_popup(HWND popup) {
     const int radius = (std::max)(2, ui_px(6));
     HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
     if (!region) return;
-    // SetWindowRgn takes ownership of the region on success.
-    if (!SetWindowRgn(popup, region, TRUE)) DeleteObject(region);
+    // SetWindowRgn takes ownership of the region on success. A redrawing region change
+    // repaints the entire popup, and the system class paints that frame white - the flash
+    // seen when a list is opened and closed quickly. Region updates therefore stay silent
+    // and the caller invalidates only the rows afterwards.
+    if (!SetWindowRgn(popup, region, redraw ? TRUE : FALSE)) DeleteObject(region);
 }
 
 LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
@@ -5036,16 +5215,22 @@ LRESULT CALLBACK combo_popup_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
     }
     // The popup is resized every time it opens; the rounded region follows. Sizing is
     // handled by size_combo_popup, which runs after the list is up.
-    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE) round_combo_popup(hwnd);
+    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE) round_combo_popup(hwnd, false);
     if (message == WM_ERASEBKGND) {
-        round_combo_popup(hwnd);
-
+        round_combo_popup(hwnd, false);
         RECT rect{};
         GetClientRect(hwnd, &rect);
         FillRect(reinterpret_cast<HDC>(wp), &rect, g_state->input_brush);
         return TRUE;
     }
     if (message == WM_THEMECHANGED || message == WM_SETFONT) InvalidateRect(hwnd, nullptr, FALSE);
+    if (message == WM_SHOWWINDOW && wp) {
+        // Windows shows the list before it sends CBN_DROPDOWN, so this is the first moment
+        // the window exists in a visible state. Re-region it while it is still empty: a
+        // region applied here costs no repaint of children and removes the white flash.
+        round_combo_popup(hwnd, false);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
     return DefSubclassProc(hwnd, message, wp, lp);
 }
 
@@ -5118,7 +5303,9 @@ void theme_combo_popup(HWND combo) {
             InvalidateRect(child, nullptr, FALSE);
         }
         SetPropW(popup, L"XFXComboPopupThemed", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
-        round_combo_popup(popup);
+        // First theme: the list is not on screen yet, so a redrawing region is safe and
+        // gives the rounded shape immediately.
+        round_combo_popup(popup, false);
         InvalidateRect(popup, nullptr, FALSE);
     }
 }
@@ -5353,6 +5540,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         for (size_t index = 0; index < xfx::layer_styles.size(); ++index) {
             create_control(hwnd, &g_state->layer_style_buttons[index], L"BUTTON", xfx::layer_styles[index].short_label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, kLayerStyleFirstId + static_cast<int>(index));
+        }
+        // First strip: the Ctrl+1..9 bindings as their own always-visible row. Both slot
+        // rows stay on screen while searching, which is what was asked for.
+        for (size_t index = 0; index < g_state->slot_buttons.size(); ++index) {
+            create_control(hwnd, &g_state->slot_buttons[index], L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kSlotFirstId + static_cast<int>(index));
         }
         // Second strip: nine user favourites, bound to modifier+1..9. This row is
         // optional because it consumes vertical space the results list wants.
@@ -5675,7 +5868,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 const auto previous_font = SelectObject(draw->hDC,
                     g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
                 SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
-                DrawTextW(draw->hDC, std::to_wstring(slot + 1).c_str(), -1, &number, DT_LEFT | DT_SINGLELINE);
+                DrawTextW(draw->hDC, (L"槽 " + std::to_wstring(slot + 1)).c_str(), -1, &number,
+                    DT_LEFT | DT_SINGLELINE);
                 SelectObject(draw->hDC, previous_font);
                 RECT label = card; label.left += px(3); label.right -= px(3); label.top += px(10);
                 auto name = slot_display_label(slot);
@@ -5806,6 +6000,42 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             LineTo(draw->hDC, draw->rcItem.right, draw->rcItem.bottom - 1);
             SelectObject(draw->hDC, previous_pen);
             DeleteObject(divider);
+            return TRUE;
+        }
+        if (draw->CtlType == ODT_BUTTON &&
+            draw->CtlID >= kSlotFirstId && draw->CtlID < kSlotFirstId + 9) {
+            // First strip (Ctrl+1..9). Same card construction as the second strip so the two
+            // rows read as one family; only the shortcut caption differs.
+            const size_t index = static_cast<size_t>(draw->CtlID - kSlotFirstId);
+            const auto name = slot_display_label(static_cast<int>(index));
+            const int width = draw->rcItem.right - draw->rcItem.left;
+            const int height = draw->rcItem.bottom - draw->rcItem.top;
+            if (width <= 0 || height <= 0) return TRUE;
+            const auto hovered_entry = g_state->button_hovers.find(g_state->slot_buttons[index]);
+            const bool hovered = hovered_entry != g_state->button_hovers.end() &&
+                hovered_entry->second.hovered;
+            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            SetDCBrushColor(draw->hDC, colors().input);
+            FillRect(draw->hDC, &draw->rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            RECT card = draw->rcItem; InflateRect(&card, -2, -2);
+            xfx::paint_round_rect(draw->hDC, card,
+                selected ? colors().selected : hovered ? colors().button : colors().surface,
+                static_cast<float>(ui_px(3)),
+                selected ? std::optional<COLORREF>(colors().accent) : std::nullopt);
+            const auto px = [hwnd](int value) { return MulDiv(value, GetDpiForWindow(hwnd), 96); };
+            RECT number = card; number.left += px(3); number.right -= px(3);
+            number.top += px(1); number.bottom = number.top + px(10);
+            const auto previous_font = SelectObject(draw->hDC,
+                g_state->slot_number_font ? g_state->slot_number_font : g_state->font);
+            SetBkMode(draw->hDC, TRANSPARENT);
+            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().success);
+            DrawTextW(draw->hDC, (L"槽 " + std::to_wstring(index + 1)).c_str(), -1, &number,
+                DT_LEFT | DT_SINGLELINE);
+            SelectObject(draw->hDC, previous_font);
+            RECT label = card; label.left += px(3); label.right -= px(3); label.top += px(10);
+            SetTextColor(draw->hDC, selected ? colors().selected_text : colors().text);
+            DrawTextW(draw->hDC, name.c_str(), -1, &label,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             return TRUE;
         }
         if (draw->CtlType == ODT_BUTTON &&
@@ -6124,6 +6354,20 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             populate_results();
             return 0;
         }
+        // CBN_DROPDOWN arrives after the list has been made visible, which is why the
+        // first paint of a freshly opened list could still be the default white face.
+        // Claim the paint before it happens: WM_ERASEBKGND of the popup now runs the same
+        // dark fill and the region is applied before any row is drawn.
+        if ((LOWORD(wparam) == kFilterId || LOWORD(wparam) == kLightThemeId ||
+             LOWORD(wparam) == kImeModeId || LOWORD(wparam) == kSlotRowKeyId ||
+             LOWORD(wparam) == kResultDigitKeyId) && HIWORD(wparam) == CBN_SELENDCANCEL) {
+            theme_combo_popup(LOWORD(wparam) == kFilterId ? g_state->filter
+                            : LOWORD(wparam) == kLightThemeId ? g_state->light_theme
+                            : LOWORD(wparam) == kImeModeId ? g_state->ime_mode_combo
+                            : LOWORD(wparam) == kSlotRowKeyId ? g_state->slot_row_key
+                            : g_state->result_digit_key);
+            return 0;
+        }
         if ((LOWORD(wparam) == kFilterId || LOWORD(wparam) == kLightThemeId ||
              LOWORD(wparam) == kImeModeId || LOWORD(wparam) == kSlotRowKeyId ||
              LOWORD(wparam) == kResultDigitKeyId) && HIWORD(wparam) == CBN_DROPDOWN) {
@@ -6132,6 +6376,17 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                             : LOWORD(wparam) == kImeModeId ? g_state->ime_mode_combo
                             : LOWORD(wparam) == kSlotRowKeyId ? g_state->slot_row_key
                             : g_state->result_digit_key);
+            return 0;
+        }
+        if (LOWORD(wparam) >= kSlotFirstId &&
+            LOWORD(wparam) < kSlotFirstId + 9 && HIWORD(wparam) == BN_CLICKED) {
+            const int index = LOWORD(wparam) - kSlotFirstId;
+            const bool occupied = !g_state->settings.slots[static_cast<size_t>(index)].empty();
+            if ((GetKeyState(VK_SHIFT) & 0x8000) || !occupied) assign_slot(index);
+            else {
+                const auto reply = execute_slot(index);
+                if (!reply.pending) set_status(utf8_to_wide(reply.message.c_str()), reply.succeeded);
+            }
             return 0;
         }
         if (LOWORD(wparam) >= kSlotRowFirstId &&
@@ -6223,6 +6478,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         // against a destroyed HWND; it then fired into the NEXT session and could bind from
         // a stale cursor reading.
         KillTimer(hwnd, kResultDragTimerId);
+        destroy_drag_ghost();
         g_state->result_drag_armed = false;
         g_state->result_drag_row = -1;
         g_state->result_drag_target = -1;

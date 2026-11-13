@@ -49,6 +49,10 @@ static void check_home_layout_restored() {
     assert(SendMessageW(g_state->filter,CB_GETCOUNT,0,0)==5);
     assert(SendMessageW(g_state->results,LB_GETCOUNT,0,0)==9);
     assert((GetWindowLongPtrW(g_state->results,GWL_STYLE)&LBS_MULTICOLUMN)!=0);
+    // The second, always-on strip is the one that must be visible on the home page; the
+    // first strip only appears together with search results.
+    for(HWND button:g_state->slot_row_buttons)assert(IsWindow(button));
+    for(HWND button:g_state->slot_buttons)assert(IsWindow(button));
     for(int id:{1120,1140,1150,1151,1152,1153})assert(!IsWindow(GetDlgItem(g_state->window,id)));
     const auto search=toolbar_layout(g_state->window).search_surface;
     assert(search.right<child_rect_in_parent(g_state->window,g_state->filter).left);
