@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.59";
+constexpr char kProductVersion[] = "1.5.60";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -1060,6 +1060,7 @@ UINT current_hotkey_modifiers() {
 void update_trace(const std::string& text, bool always = false);
 
 // Index of the second-strip cell under the given screen point, or -1.
+void set_status(const std::wstring& message, bool success = false);
 int slot_row_cell_at(POINT point) {
     if (!g_state) return -1;
     for (size_t index = 0; index < g_state->slot_row_buttons.size(); ++index) {
@@ -1109,6 +1110,12 @@ void update_result_drag_target() {
     g_state->result_drag_target = target;
     update_trace("drag-target=" + std::to_string(target) + " cursor=" +
         std::to_string(cursor.x) + "," + std::to_string(cursor.y));
+    // Tell the user what will happen when they let go. Without this a drag that is working
+    // looks exactly like one that is not: nothing changes until the drop.
+    if (target >= 0)
+        set_status(L"松开鼠标绑定到第二行第 " + std::to_wstring(target + 1) + L" 格");
+    else if (g_state->result_drag_armed)
+        set_status(L"把结果拖到第二行的格子上再松手");
     repaint_slot_row_cells();
 }
 
@@ -1241,7 +1248,7 @@ bool ensure_hotkey_window() {
 void update_trace(const std::string& text, bool always);
 void export_diagnostic_log();
 
-void set_status(const std::wstring& message, bool success = false) {
+void set_status(const std::wstring& message, bool success) {
     if (g_state && g_state->status) {
         SetWindowTextW(g_state->status, message.c_str());
         g_state->status_important=message.find(L"失败")!=std::wstring::npos || message.find(L"不可用")!=std::wstring::npos || message.find(L"部分完成")!=std::wstring::npos;

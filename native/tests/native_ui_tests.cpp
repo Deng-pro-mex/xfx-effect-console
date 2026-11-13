@@ -567,6 +567,94 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--drag-guidance") {
+            // A drag that works and a drag that does nothing look identical until the drop.
+            // The status line must say what is about to happen while the button is held.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            g_test_drag_button_held = true;
+
+            // Over a cell: name the cell.
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[3], &cell));
+            g_test_drag_cursor = POINT{(cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2};
+            update_result_drag_target();
+            pump_for(120);
+            wchar_t status[512]{};
+            GetWindowTextW(g_state->status, status, 512);
+            std::cout << "  over cell 4: " << wide_to_utf8(status) << "\n";
+            assert(std::wstring(status).find(L"第 4 格") != std::wstring::npos);
+
+            // Away from every cell: explain the gesture.
+            g_test_drag_cursor = POINT{g_state->window ? 4 : 4, 4};
+            update_result_drag_target();
+            pump_for(120);
+            GetWindowTextW(g_state->status, status, 512);
+            std::cout << "  away from cells: " << wide_to_utf8(status) << "\n";
+            assert(std::wstring(status).find(L"拖到") != std::wstring::npos);
+
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            pump_for(80);
+            std::cout << "PASS a held drag tells the user what releasing will do\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--drop-highlight-visible") {
+            // The drag has to SHOW where the drop will land. A gesture whose target is
+            // invisible feels dead even when it would bind.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(260);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+
+            // Arm the drag and hold the cursor over cell 6 without releasing.
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, 0,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            SendMessageW(g_state->results, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, row.top + 4));
+            assert(g_state->result_drag_armed);
+            RECT cell{};
+            assert(GetWindowRect(g_state->slot_row_buttons[5], &cell));
+            g_test_drag_cursor = POINT{(cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2};
+            g_test_drag_button_held = true;
+            update_result_drag_target();
+            repaint_slot_row_cells();
+            pump_for(260);
+            std::cout << "  drag target = " << g_state->result_drag_target << "\n";
+            assert(g_state->result_drag_target == 5);
+            // Ship the artefact: the exactly-what-the-user-sees proof of the highlight.
+            if (argc > 1) {
+                save_test_preview(g_state->window,
+                    fs::path(argv[1]).parent_path() / L"drop-highlight.png");
+            }
+            g_test_drag_button_held.reset();
+            g_test_drag_cursor.reset();
+            pump_for(120);
+            std::cout << "PASS the drop target is resolved during a drag and captured\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-cleanup") {
             // Two leaks that only show up in a long session:
             //  1. closing the palette mid-drag left the 30 ms poll timer running, which kept
