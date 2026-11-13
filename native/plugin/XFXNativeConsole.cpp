@@ -135,7 +135,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.67";
+constexpr char kProductVersion[] = "1.5.68";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -2732,6 +2732,8 @@ void refresh_catalog() {
 #ifdef XFX_CONSOLE_TEST
 std::optional<bool> g_test_force_modal;
 std::optional<bool> g_test_scripting_available = true;
+// Returns a canned outcome for the native AEGP apply path, or nullopt to run it for real.
+std::optional<xfx::ScriptReply> g_test_native_apply;
 int g_test_message_box_count = 0;
 #endif
 
@@ -2821,6 +2823,7 @@ bool is_modal_script_rejection(const std::string& message) {
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback);
 xfx::ScriptReply run_ae_script(const std::string& script, bool show_feedback = true);
 void show_console(bool visible);
+std::optional<xfx::ScriptReply> try_native_apply_effect(const std::string& match_name);
 
 // Asks the host whether scripting may run right now. Cheap, side-effect free, and the
 // only reliable signal: AEGP_ExecuteScript fails (and AE shows its own error dialog)
@@ -2908,6 +2911,10 @@ struct PendingApply {
     std::wstring item_key;      // remembered for the recents list; empty for none
     bool remember = false;
     bool close_console = true;  // hide the palette while AE renders, as before
+    // Effect match name when this job is a plain effect apply. Empty for presets, layer
+    // styles and every other script. Set means the AEGP layer suite can do the work
+    // without ExtendScript, which is the call that blocks for a minute.
+    std::string native_match_name;
 };
 std::deque<PendingApply> g_pending_applies;
 // When the oldest staged request started waiting, so a host that never reports
@@ -2934,9 +2941,11 @@ constexpr ULONGLONG kStartupSettleMs = 1200;
 constexpr ULONGLONG kModalRetryBudgetMs = 20000;
 
 // Stages an apply for the next idle callback. Returns immediately.
-void stage_apply(std::string script, std::wstring item_key, bool remember, bool close_console) {
+void stage_apply(std::string script, std::wstring item_key, bool remember, bool close_console,
+                 std::string native_match_name = {}) {
     if (g_pending_applies.size() >= 8) g_pending_applies.pop_front();
-    g_pending_applies.push_back({std::move(script), std::move(item_key), remember, close_console});
+    g_pending_applies.push_back({std::move(script), std::move(item_key), remember, close_console,
+        std::move(native_match_name)});
 }
 
 // Public entry point for host work. Everything goes through the idle queue so no host
@@ -2968,7 +2977,10 @@ bool run_pending_apply_on_idle() {
     // Require a few consecutive clear idles before acting: AE briefly reports a usable
     // scripting state while a modal loop is still unwinding, and acting on that single
     // sample is what produced the intermittent refusal.
-    if (!host_scripting_available() || ae_modal_pending()) {
+    // A job that the AEGP layer suite can finish needs no scripting, so the scripting gate
+    // below must not hold it - that gate is exactly what a refused session trips.
+    const bool native_capable = !g_pending_applies.front().native_match_name.empty();
+    if (ae_modal_pending() || (!native_capable && !host_scripting_available())) {
         g_apply_clear_streak = 0;
         const ULONGLONG now = GetTickCount64();
         if (!g_pending_apply_since) {
@@ -3050,7 +3062,12 @@ bool run_pending_apply_on_idle() {
         ShowWindow(presentation.window, SW_HIDE);
     }
     if (g_state) { g_state->ime.restore(); g_state->ime_session_active = false; }
-    const auto reply = run_ae_script_now(job.script, false);
+    // Prefer the AEGP layer suite for a plain effect apply: AEGP_ExecuteScript is the call
+    // that blocks the UI thread for over a minute before AE raises its modal-script dialog.
+    // Only a "could not even begin" result falls back to the script below.
+    std::optional<xfx::ScriptReply> native_reply;
+    if (!job.native_match_name.empty()) native_reply = try_native_apply_effect(job.native_match_name);
+    const auto reply = native_reply ? *native_reply : run_ae_script_now(job.script, false);
     presentation.applied = reply.succeeded;
     if (reply.pending) {
         // The precheck inside run_ae_script_now parked it again; nothing to report yet.
@@ -3074,7 +3091,8 @@ bool run_pending_apply_on_idle() {
         // settling. A first-time user must see a wait, not an error: re-queue and keep
         // waiting rather than reporting a failure that will not reproduce moments later.
         if (g_pending_applies.size() < 8 && !reply.pending) {
-            g_pending_applies.push_back({job.script, job.item_key, job.remember, job.close_console});
+            g_pending_applies.push_back({job.script, job.item_key, job.remember, job.close_console,
+                job.native_match_name});
         }
         set_status(L"AE 正在准备，效果马上应用…");
         presentation.deferred = presentation.was_visible;
@@ -3083,6 +3101,99 @@ bool run_pending_apply_on_idle() {
         set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));
     }
     return true;
+}
+
+// Applies an effect to every selected layer through the AEGP layer suite instead of
+// ExtendScript. This exists because AEGP_ExecuteScript is what parks the UI thread for
+// over a minute and then raises "当模式对话框正在等待回应时，无法运行脚本": a measured
+// session blocked 83 s inside that one call. Adding one effect needs none of ExtendScript,
+// so the native path is used whenever it can start and scripting is only the fallback.
+// Returns std::nullopt when it could not even begin (no project, no selection, or a suite
+// that is not available), which is the only case where the caller may fall back.
+std::optional<xfx::ScriptReply> try_native_apply_effect(const std::string& match_name) {
+#ifdef XFX_CONSOLE_TEST
+    if (g_test_native_apply) return *g_test_native_apply;
+#endif
+    if (!g_basic || match_name.empty()) return std::nullopt;
+    try {
+        AEGP_SuiteHandler suites(g_basic);
+        AEGP_ItemH active_item = nullptr;
+        if (suites.ItemSuite8()->AEGP_GetActiveItem(&active_item) || !active_item) return std::nullopt;
+        AEGP_ItemType item_type = AEGP_ItemType_NONE;
+        if (suites.ItemSuite8()->AEGP_GetItemType(active_item, &item_type) || item_type != AEGP_ItemType_COMP)
+            return std::nullopt;
+        AEGP_CompH comp = nullptr;
+        if (suites.CompSuite10()->AEGP_GetCompFromItem(active_item, &comp) || !comp) return std::nullopt;
+        // Selected layers, in the order the user has them selected.
+        AEGP_Collection2H selection = nullptr;
+        if (suites.CompSuite10()->AEGP_GetNewCollectionFromCompSelection(g_plugin_id, comp, &selection) ||
+            !selection) return std::nullopt;
+        struct CollectionGuard {
+            AEGP_SuiteHandler* suites;
+            AEGP_Collection2H collection;
+            ~CollectionGuard() { if (collection) suites->CollectionSuite2()->AEGP_DisposeCollection(collection); }
+        } collection_guard{&suites, selection};
+        A_u_long selected = 0;
+        if (suites.CollectionSuite2()->AEGP_GetCollectionNumItems(selection, &selected)) return std::nullopt;
+        if (selected == 0) {
+            xfx::ScriptReply reply;
+            reply.message = "请先选择一个或多个图层";
+            return reply;
+        }
+        // Resolve the match name to the host's own installed-effect key once. Match names
+        // are stable ASCII identifiers, so comparing them is exact and never substitutes a
+        // similarly named effect.
+        AEGP_InstalledEffectKey effect_key = AEGP_InstalledEffectKey_NONE;
+        A_long installed = 0;
+        if (suites.EffectSuite4()->AEGP_GetNumInstalledEffects(&installed)) return std::nullopt;
+        AEGP_InstalledEffectKey cursor = AEGP_InstalledEffectKey_NONE;
+        for (A_long index = 0; index < installed; ++index) {
+            if (suites.EffectSuite4()->AEGP_GetNextInstalledEffect(cursor, &cursor)) break;
+            char candidate[AEGP_MAX_EFFECT_MATCH_NAME_SIZE + 1] = {};
+            if (suites.EffectSuite4()->AEGP_GetEffectMatchName(cursor, candidate)) continue;
+            if (match_name == candidate) { effect_key = cursor; break; }
+        }
+        if (effect_key == AEGP_InstalledEffectKey_NONE) {
+            // The item is stale: refreshing the index is the documented recovery, and it is
+            // not something this call can do without changing what the user sees.
+            xfx::ScriptReply reply;
+            reply.message = "效果已不可用，请刷新索引: " + match_name;
+            return reply;
+        }
+        int applied = 0;
+        std::vector<std::wstring> problems;
+        // One undo step for the whole gesture, matching the scripting path exactly.
+        const A_Err undo_open = suites.UtilitySuite6()->AEGP_StartUndoGroup("XFXConsole 应用效果");
+        for (A_u_long index = 0; index < selected; ++index) {
+            AEGP_CollectionItemV2 entry{};
+            if (suites.CollectionSuite2()->AEGP_GetCollectionItemByIndex(selection, index, &entry)) continue;
+            if (entry.type != AEGP_CollectionItemType_LAYER) continue;
+            AEGP_EffectRefH applied_ref = nullptr;
+            const A_Err error = suites.EffectSuite4()->AEGP_ApplyEffect(
+                g_plugin_id, entry.u.layer.layerH, effect_key, &applied_ref);
+            if (error == A_Err_NONE && applied_ref) {
+                ++applied;
+                suites.EffectSuite4()->AEGP_DisposeEffect(applied_ref);
+            } else {
+                problems.push_back(L"AE 拒绝了其中一个图层");
+            }
+        }
+        if (undo_open == A_Err_NONE) suites.UtilitySuite6()->AEGP_EndUndoGroup();
+        update_trace("native-apply match=" + match_name + " layers=" + std::to_string(applied) +
+            " failed=" + std::to_string(problems.size()));
+        xfx::ScriptReply reply;
+        reply.succeeded = applied > 0;
+        reply.count = applied;
+        reply.partial = applied > 0 && !problems.empty();
+        if (applied == 0) reply.message = "AE 未能把效果添加到所选图层";
+        else if (!problems.empty()) reply.message = "部分图层未能应用效果";
+        return reply;
+    } catch (...) {
+        // A missing suite or a host that refuses the call: nothing was changed, so the
+        // caller may use the scripting fallback.
+        update_trace("native-apply-unavailable");
+        return std::nullopt;
+    }
 }
 
 xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback = true) {
@@ -3121,7 +3232,7 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         // A call made then blocks the UI thread for a minute and only then reports the
         // refusal (measured 53 s in a real session), which is far worse than waiting.
         if (ae_modal_pending()) {
-            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
+            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true, {}});
             xfx::ScriptReply deferred;
             deferred.pending = true;
             deferred.message = "AE 正在等待对话框关闭，操作已排队";
@@ -3167,7 +3278,7 @@ xfx::ScriptReply run_ae_script_now(const std::string& script, bool show_feedback
         if (retry_modal || (error && early_session)) {
             if (result_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(result_handle); } catch (...) {} result_handle = nullptr; }
             if (error_handle) { try { suites.MemorySuite1()->AEGP_FreeMemHandle(error_handle); } catch (...) {} error_handle = nullptr; }
-            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true});
+            if (g_pending_applies.size() < 8) g_pending_applies.push_back({script, L"", false, true, {}});
             xfx::ScriptReply deferred;
             deferred.pending = true;
             deferred.message = "AE 正在等待对话框关闭，操作已排队";
@@ -3235,7 +3346,9 @@ xfx::ScriptReply execute_item(const xfx::CatalogItem& selected_item) {
         ? xfx::script_apply_preset(item.file_path) : xfx::script_apply_effect(item.match_name));
     // Stage the apply for the next idle callback. Running AEGP_ExecuteScript straight
     // from this window message is what intermittently hit AE's modal-script error.
-    stage_apply(script, item_key(item), true, true);
+    stage_apply(script, item_key(item), true, true,
+        item.item_type == L"effect" && override == g_state->settings.overrides.end()
+            ? item.match_name : std::string{});
     xfx::ScriptReply staged;
     staged.succeeded = true;
     staged.message = "已排队应用";

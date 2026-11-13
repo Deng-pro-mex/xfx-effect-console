@@ -53,30 +53,62 @@ struct MenuItem {
 };
 struct MenuBackground { HMENU menu{}; HBRUSH original{}; bool changed = false; };
 
+// Rounds the frame of one popup menu window. A menu window ("#32768") is created and sized
+// by User32 for exactly the lifetime of one popup, and WM_INITMENUPOPUP arrives BEFORE that
+// size is known - which is why a region computed there produced square corners. The window
+// is therefore subclassed as soon as it appears and re-shaped on every resize.
+constexpr UINT_PTR kMenuRoundSubclassId = 0xB601;
+constexpr UINT kMenuRoundTimerId = 0xB602;
+
+void apply_menu_round_region(HWND window, bool redraw) {
+    if (!window || !IsWindow(window)) return;
+    RECT bounds{};
+    if (!GetWindowRect(window, &bounds)) return;
+    const int width = bounds.right - bounds.left;
+    const int height = bounds.bottom - bounds.top;
+    const int dpi = GetDpiForWindow(window);
+    const int radius = MulDiv(6, dpi ? dpi : 96, 96);
+    if (width <= radius * 2 || height <= radius * 2) return;
+    RECT existing{};
+    if (GetWindowRgnBox(window, &existing) != ERROR && existing.right - existing.left == width &&
+        existing.bottom - existing.top == height) return;
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+    if (region && !SetWindowRgn(window, region, redraw ? TRUE : FALSE)) DeleteObject(region);
+}
+
+LRESULT CALLBACK menu_round_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+                                 UINT_PTR id, DWORD_PTR) {
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, menu_round_proc, id);
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+    // The popup is positioned and sized after it is created; every one of those steps must
+    // re-shape it, or the corner is cut against a stale rectangle.
+    if (message == WM_WINDOWPOSCHANGED || message == WM_SIZE || message == WM_SHOWWINDOW ||
+        message == WM_PAINT || message == WM_NCPAINT)
+        apply_menu_round_region(hwnd, false);
+    return DefSubclassProc(hwnd, message, wparam, lparam);
+}
+
+} // namespace
+
 // Applies the console's rounded corner to every popup menu window of this thread that is
-// currently open. Called from WM_INITMENUPOPUP: at that moment a nested submenu window
-// exists but has not painted its frame yet, so the shape costs no visible repaint.
+// currently open, and starts watching each one so later resizes stay rounded.
 void round_open_menu_windows() {
-    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM) -> BOOL {
+    bool found = false;
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM raw) -> BOOL {
+        auto* seen = reinterpret_cast<bool*>(raw);
         wchar_t name[32]{};
         if (!GetClassNameW(window, name, 32)) return TRUE;
         if (wcscmp(name, L"#32768") != 0) return TRUE;
-        if (!IsWindowVisible(window)) return TRUE;
-        RECT bounds{};
-        if (!GetWindowRect(window, &bounds)) return TRUE;
-        const int width = bounds.right - bounds.left;
-        const int height = bounds.bottom - bounds.top;
-        if (width <= 0 || height <= 0) return TRUE;
-        const int dpi = GetDpiForWindow(window);
-        const int radius = MulDiv(6, dpi ? dpi : 96, 96);
-        RECT existing{};
-        if (GetWindowRgnBox(window, &existing) != ERROR && existing.right - existing.left == width &&
-            existing.bottom - existing.top == height) return TRUE;
-        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
-        if (region && !SetWindowRgn(window, region, FALSE)) DeleteObject(region);
+        *seen = true;
+        SetWindowSubclass(window, menu_round_proc, kMenuRoundSubclassId, 0);
+        apply_menu_round_region(window, false);
         return TRUE;
-    }, 0);
+    }, reinterpret_cast<LPARAM>(&found));
 }
+
+namespace {
 
 class PopupSession {
 public:

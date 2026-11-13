@@ -41,6 +41,11 @@ UINT track_themed_action_popup(HMENU menu, UINT flags, int x, int y, HWND owner,
 
 // Shared production/test geometry. All rectangles are half-open, in the same
 // coordinate system as row; tiny rows have no actionable cells, never overlap.
+// Rounds every open popup menu window of the calling thread and keeps it rounded across
+// later resizes. Called from WM_INITMENUPOPUP, and exposed so the shape can be verified
+// without a live menu loop.
+void round_open_menu_windows();
+
 namespace menu_action_detail {
 struct Layout { RECT label{}; std::array<RECT, 3> cells{}; };
 Layout layout(RECT row, int dpi = 96);

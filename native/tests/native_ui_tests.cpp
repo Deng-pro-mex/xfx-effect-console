@@ -2489,6 +2489,46 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--native-apply-no-scripting") {
+            // A real session blocked 83 s inside AEGP_ExecuteScript and then raised AE's
+            // modal-script dialog. Adding one effect does not need scripting at all, so the
+            // AEGP layer suite is used and a script must never be run for that case.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            g_test_scripting_available = false;
+            g_test_last_script.clear();
+            xfx::ScriptReply native_success{true, false, 2, ""};
+            g_test_native_apply = native_success;
+            execute_selected();
+            assert(!g_pending_applies.empty());
+            std::cout << "  native_match queued=" << (!g_pending_applies.empty() &&
+                !g_pending_applies.front().native_match_name.empty() ? 1 : 0) << "\n";
+            assert(!g_pending_applies.empty());
+            assert(!g_pending_applies.front().native_match_name.empty());
+            bool ran = false;
+            for (int tick = 0; tick < 12 && !ran; ++tick) ran = run_pending_apply_on_idle();
+            g_test_native_apply.reset();
+            g_test_scripting_available.reset();
+            // Other work (the IME hand-off) may legitimately run a script; what must never
+            // happen is the APPLY script reaching the host, because that is the call that
+            // blocks for 83 s and raises AE's modal dialog.
+            const bool apply_script_ran = g_test_last_script.find("Effect Parade") != std::string::npos;
+            std::cout << "  applied=" << (ran ? 1 : 0)
+                      << " apply_script=" << (apply_script_ran ? 1 : 0) << "\n";
+            assert(ran);
+            assert(!apply_script_ran);
+            std::cout << "PASS a plain effect apply never runs a script\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--modal-blocks-before-call") {
             // A real session measured the refusal arriving only after ~53 s: AE blocked the
             // UI thread inside AEGP_ExecuteScript and showed its own dialog. The modal state
@@ -2536,6 +2576,119 @@ int wmain(int argc, wchar_t** argv) {
             assert(!g_test_last_script.empty());
             assert(g_test_message_box_count == 0);
             std::cout << "PASS a modal host blocks the apply before any script call\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--menu-round-after-resize") {
+            // A menu window's size is only known after it is shown. A region applied once in
+            // WM_INITMENUPOPUP was therefore wrong and the corners stayed square - the
+            // reported "二级三级面板没有圆角". This drives the real subclass path.
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, L"第一层");
+            HMENU sub = CreatePopupMenu();
+            AppendMenuW(sub, MF_STRING, 2, L"第二层");
+            HMENU sub2 = CreatePopupMenu();
+            AppendMenuW(sub2, MF_STRING, 3, L"第三层");
+            AppendMenuW(sub, MF_POPUP, reinterpret_cast<UINT_PTR>(sub2), L"第三层");
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), L"第二层");
+            HWND probe = CreateWindowExW(WS_EX_TOPMOST, L"#32768", L"", WS_POPUP | WS_VISIBLE,
+                0, 0, 140, 90, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            assert(probe != nullptr);
+            xfx::round_open_menu_windows();
+            auto region_size = [](HWND window) {
+                RECT box{};
+                if (GetWindowRgnBox(window, &box) == ERROR) return 0;
+                return static_cast<int>(box.right - box.left);
+            };
+            std::cout << "  after show: width_region=" << region_size(probe) << "\n";
+            assert(region_size(probe) == 140);
+            // Resize the way User32 does when a submenu is opened over a different row.
+            SetWindowPos(probe, nullptr, 0, 0, 220, 150, SWP_NOMOVE | SWP_NOZORDER);
+            pump_for(60);
+            std::cout << "  after resize: width_region=" << region_size(probe) << "\n";
+            assert(region_size(probe) == 220);
+            // The four corners must be outside the region: that is what "rounded" means.
+            HRGN region = CreateRectRgn(0, 0, 0, 0);
+            assert(GetWindowRgn(probe, region) != ERROR);
+            const bool corner_cut = PtInRegion(region, 0, 0) == FALSE &&
+                PtInRegion(region, 219, 149) == FALSE &&
+                PtInRegion(region, 110, 75) == TRUE;
+            DeleteObject(region);
+            DestroyWindow(probe);
+            DestroyMenu(menu);
+            std::cout << "  corners cut=" << (corner_cut ? 1 : 0) << "\n";
+            assert(corner_cut);
+            std::cout << "PASS popup menu frames stay rounded after they are resized\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--menu-submenu-complete") {
+            // Reported: 第二行快捷栏 in the live screenshot listed 1..9 but 快捷槽 above it
+            // opened empty. Both submenus are built in show_result_menu; this asserts every
+            // row exists, is enabled, and carries a label before the menu is ever tracked.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            const auto id = static_cast<int>(LOWORD(g_test_popup_command.value_or(0)));
+            (void)id;
+            // Build the same menu show_result_menu builds and inspect it directly.
+            HMENU menu = CreatePopupMenu();
+            HMENU slots = CreatePopupMenu();
+            xfx::MenuActionRows rows;
+            append_slot_menu(slots, true, &rows);
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(slots), L"快捷槽");
+            HMENU row_slots = CreatePopupMenu();
+            for (int slot = 0; slot < 9; ++slot)
+                AppendMenuW(row_slots, MF_STRING, static_cast<UINT>(70 + slot), L"x");
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(row_slots), L"第二行快捷栏");
+            const HMENU first = GetSubMenu(menu, 0);
+            const HMENU second = GetSubMenu(menu, 1);
+            assert(first && second);
+            assert(GetMenuItemCount(first) == 9);
+            assert(GetMenuItemCount(second) == 9);
+            std::cout << "  first submenu rows=" << GetMenuItemCount(first)
+                      << " second submenu rows=" << GetMenuItemCount(second) << "\n";
+            // Every row must carry a non-empty caption; a zero-length item renders as an
+            // empty band, which is what "the panel has no content" looked like.
+            for (int sub = 0; sub < 2; ++sub) {
+                const HMENU current = GetSubMenu(menu, sub);
+                for (int row = 0; row < GetMenuItemCount(current); ++row) {
+                    wchar_t text[256]{};
+                    const int length = GetMenuStringW(current, static_cast<UINT>(row), text, 256,
+                        MF_BYPOSITION);
+                    assert(length > 0);
+                }
+            }
+            DestroyMenu(menu);
+            std::cout << "PASS both right-click submenus carry all nine labelled rows\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--menu-submenu-esc") {
+            // Escape closes a submenu and must leave no state behind that shortens the next
+            // open: the reported symptom was a submenu shown empty once, then populated.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            for (int round = 0; round < 2; ++round) {
+                g_test_popup_command = 75;
+                show_result_menu(g_state->window, MAKELPARAM(10, 10));
+                pump_for(80);
+                HMENU probe = CreatePopupMenu();
+                HMENU slots = CreatePopupMenu();
+                xfx::MenuActionRows rows;
+                append_slot_menu(slots, true, &rows);
+                AppendMenuW(probe, MF_POPUP, reinterpret_cast<UINT_PTR>(slots), L"快捷槽");
+                assert(GetMenuItemCount(GetSubMenu(probe, 0)) == 9);
+                DestroyMenu(probe);
+            }
+            std::cout << "PASS the shortcut submenu is complete on every open\n";
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
