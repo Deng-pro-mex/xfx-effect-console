@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.60";
+constexpr char kProductVersion[] = "1.5.61";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -172,6 +172,8 @@ std::vector<xfx::CatalogItem> g_test_catalog;
 unsigned int g_test_catalog_scan_count = 0;
 std::optional<xfx::ScriptReply> g_test_script_reply;
 void (*g_test_before_script)() = nullptr;
+int g_test_script_calls = 0;
+void count_test_script_calls() { ++g_test_script_calls; }
 std::string g_test_last_script;
 std::optional<POINT> g_test_cursor_position;
 // The drag helper reads the real cursor, which a test cannot move.
@@ -2712,6 +2714,13 @@ ULONGLONG g_pending_apply_since = 0;
 ULONGLONG g_first_idle_tick = 0;
 // Number of consecutive idle callbacks where both readiness signals were clear.
 int g_apply_clear_streak = 0;
+// Set once a first apply has actually succeeded. Until then a host refusal is retried
+// silently rather than reported: on a fresh AE session the first scripting call is
+// routinely refused while AE is still settling after startup.
+bool g_first_apply_hint_shown = false;
+// How many times the startup apply has been re-queued. Bounded so a real failure still
+// surfaces instead of retrying forever.
+int g_first_apply_retries = 0;
 constexpr int kRequiredClearStreak = 3;
 constexpr ULONGLONG kStartupSettleMs = 1200;
 // How long a modal-script refusal is treated as "wait and retry". After a restart AE
@@ -2852,6 +2861,18 @@ bool run_pending_apply_on_idle() {
     }
     if (reply.succeeded && !reply.partial) {
         set_status(L"已应用到 " + std::to_wstring(reply.count) + L" 个所选图层 · Ctrl+Z 撤销", true);
+        g_first_apply_hint_shown = true;
+    } else if (!g_first_apply_hint_shown && g_first_apply_retries < 8 &&
+               is_modal_script_rejection(reply.message)) {
+        ++g_first_apply_retries;
+        // The very first apply of a session is the one AE refuses while it is still
+        // settling. A first-time user must see a wait, not an error: re-queue and keep
+        // waiting rather than reporting a failure that will not reproduce moments later.
+        if (g_pending_applies.size() < 8 && !reply.pending) {
+            g_pending_applies.push_back({job.script, job.item_key, job.remember, job.close_console});
+        }
+        set_status(L"AE 正在准备，效果马上应用…");
+        presentation.deferred = presentation.was_visible;
     } else {
         // Partial is not success: keep the palette open and name what failed.
         set_status((reply.partial ? L"部分完成：" : L"操作失败：") + utf8_to_wide(reply.message.c_str()));

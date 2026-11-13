@@ -567,6 +567,64 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--first-apply-no-error") {
+            // The reported "first use shows a popup" is AE refusing scripting while it is
+            // still settling. A first-time user must see a wait, not an error. Simulate a
+            // host that refuses once, then works.
+            show_console();
+            pump_for(220);
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+
+            // Apply #1: the host refuses with AE's real modal wording.
+            g_pending_applies.clear();
+            g_first_apply_hint_shown = false;
+            g_first_apply_retries = 0;
+            g_test_script_calls = 0;
+            g_test_before_script = count_test_script_calls;
+            g_test_script_reply = xfx::ScriptReply{false, false, 0,
+                "错误: 当模式对话框正在等待回应时，无法运行脚本。"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 10 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(30);
+            }
+            wchar_t status[512]{};
+            GetWindowTextW(g_state->status, status, 512);
+            const std::wstring first_status(status);
+            std::cout << "  first apply status: " << wide_to_utf8(first_status)
+                      << " requeued=" << g_pending_applies.size()
+                      << " retries=" << g_first_apply_retries << "\n";
+            // No error dialog, no "失败" wording, and the work is still queued.
+            assert(g_test_message_box_count == 0);
+            assert(first_status.find(L"失败") == std::wstring::npos);
+            assert(!g_pending_applies.empty());
+            assert(g_first_apply_retries >= 1);
+
+            // Apply #2: the host is ready and the same request succeeds.
+            g_test_script_reply = xfx::ScriptReply{true, false, 1, "ok"};
+            for (int tick = 0; tick < 14 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(30);
+            }
+            g_test_script_reply.reset();
+            g_test_before_script = nullptr;
+            pump_for(150);
+            std::cout << "  after the host clears: script_calls=" << g_test_script_calls
+                      << " queued=" << g_pending_applies.size() << "\n";
+            assert(g_test_script_calls >= 2);
+            assert(g_first_apply_hint_shown);
+            assert(g_test_message_box_count == 0);
+            std::cout << "PASS the first apply waits instead of raising an error dialog\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-guidance") {
             // A drag that works and a drag that does nothing look identical until the drop.
             // The status line must say what is about to happen while the button is held.
