@@ -567,6 +567,59 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--no-dialog-on-failure") {
+            // The reported "第一次使用效果会出现弹窗" had two sources: AE's script refusal
+            // (handled by the queue) and our own MessageBox paths. A failed apply must
+            // report in the status line only - never a modal dialog the user must dismiss
+            // before they can keep working.
+            show_console();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            pump_for(200);
+            assert(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0) > 0);
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_applies.clear();
+            const int dialogs_before = g_test_message_box_count;
+
+            // 1. The host refuses the script with a plain error.
+            g_test_script_reply = xfx::ScriptReply{false, false, 0, "AE script execution failed"};
+            g_first_idle_tick = GetTickCount64() - 60000;
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 14 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            pump_for(160);
+            wchar_t status[512]{};
+            GetWindowTextW(g_state->status, status, 512);
+            std::cout << "  failure status: " << wide_to_utf8(status) << "\n";
+            assert(g_test_message_box_count == dialogs_before);   // no dialog
+            assert(std::wstring(status).find(L"失败") != std::wstring::npos);
+            // The palette must still be there: the user needs to see the reason.
+            if (!IsWindow(g_state->window)) { show_console(); pump_for(200); }
+            assert(IsWindow(g_state->window));
+
+            // 2. A partial apply (some layers failed) is also status-only.
+            g_test_script_reply = xfx::ScriptReply{true, true, 2, "1 个图层没有可应用的位置"};
+            SendMessageW(g_state->results, LB_SETCURSEL, 0, 0);
+            g_pending_apply_since = 0;
+            g_apply_clear_streak = 0;
+            execute_selected();
+            for (int tick = 0; tick < 14 && !g_pending_applies.empty(); ++tick) {
+                run_pending_apply_on_idle();
+                pump_for(20);
+            }
+            pump_for(150);
+            GetWindowTextW(g_state->status, status, 512);
+            std::cout << "  partial status: " << wide_to_utf8(status) << "\n";
+            assert(g_test_message_box_count == dialogs_before);
+            std::cout << "PASS a failed or partial apply reports in the status line, never a dialog\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--drag-zoom-scale") {
             // A drag is resolved by testing the REAL cursor against each cell's screen
             // rectangle. At a non-100 % scale those rectangles are scaled, and a hit test
