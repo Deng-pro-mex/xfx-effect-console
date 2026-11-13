@@ -567,6 +567,64 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--small-screen") {
+            // The palette is 520 logical pixels wide and grows downwards with the strip and
+            // the results. On a laptop at 150 % with a 1366x768 screen the work area is only
+            // ~900x500 logical pixels, and a window that extends past the bottom edge hides
+            // its own status line and strip - which reads as "the panel is cut off".
+            show_console();
+            g_state->settings.show_slot_row = true;
+            SetWindowTextW(g_state->search, L"");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(240);
+
+            // Shrink the virtual screen by moving the palette into a corner and checking it
+            // still fits inside the monitor's work area after every height change.
+            struct Probe { const wchar_t* name; std::function<void()> action; };
+            const Probe probes[] = {
+                {L"default", [] {}},
+                {L"settings", [] { SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0); }},
+                {L"settings-off", [] { SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0); }},
+            };
+            for (const auto& probe : probes) {
+                probe.action();
+                pump_for(320);
+                RECT box{};
+                assert(GetWindowRect(g_state->window, &box));
+                MONITORINFO monitor{sizeof(monitor)};
+                assert(GetMonitorInfoW(MonitorFromWindow(g_state->window, MONITOR_DEFAULTTONEAREST),
+                    &monitor));
+                const RECT& work = monitor.rcWork;
+                std::cout << "  " << wide_to_utf8(probe.name)
+                          << " window=" << box.left << "," << box.top << " "
+                          << (box.right - box.left) << "x" << (box.bottom - box.top)
+                          << " work=" << work.left << "," << work.top << " "
+                          << (work.right - work.left) << "x" << (work.bottom - work.top) << "\n";
+                // It must never be taller than the work area or positioned above it.
+                assert(box.bottom - box.top <= work.bottom - work.top);
+                assert(box.top >= work.top);
+                assert(box.right - box.left <= work.right - work.left);
+                // And the status line has to remain fully inside the window.
+                if (IsWindowVisible(g_state->status)) {
+                    RECT status{};
+                    assert(GetWindowRect(g_state->status, &status));
+                    assert(status.bottom <= box.bottom);
+                    assert(status.top >= box.top);
+                }
+            }
+            // Clamping the height must not collapse the list: it has to stay scrollable
+            // and keep showing a meaningful number of rows.
+            assert(IsWindowVisible(g_state->results));
+            RECT list{};
+            assert(GetWindowRect(g_state->results, &list));
+            std::cout << "  results height after clamping: " << (list.bottom - list.top) << "\n";
+            assert(list.bottom - list.top >= 18);
+            std::cout << "PASS the palette always fits inside the monitor work area\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--popup-screenshot") {
             // Direct visual proof for the two reported dropdown bugs: the list was all
             // white and every corner was square. Open each dropdown and capture the REAL

@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.48";
+constexpr char kProductVersion[] = "1.5.49";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -4426,11 +4426,16 @@ void adjust_console_height() {
     RECT desired{0, 0, client.right, static_cast<LONG>((56 + list_part + style_part +
         favourites_part + 22 + g_state->settings_extent)*scale)};
     AdjustWindowRectEx(&desired, style, FALSE, GetWindowLongW(hwnd, GWL_EXSTYLE));
-    const int height = desired.bottom - desired.top;
+    int height = desired.bottom - desired.top;
     RECT current{}; GetWindowRect(hwnd, &current);
-    if (current.bottom - current.top == height) return;
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+    // Never grow past the work area. On a 1366x768 laptop at 150 % the results, style row
+    // and strip together exceed the screen, and the window used to be positioned so that
+    // its own status line sat below the taskbar - the palette looked cut off.
+    const int work_height = monitor.rcWork.bottom - monitor.rcWork.top;
+    if (work_height > 0 && height > work_height) height = work_height;
+    if (current.bottom - current.top == height) return;
     const int top = (std::max)(monitor.rcWork.top, (std::min)(current.top, monitor.rcWork.bottom - height));
     SetWindowPos(hwnd, nullptr, current.left, top, current.right - current.left, height,
         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS);
