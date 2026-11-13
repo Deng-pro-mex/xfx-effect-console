@@ -567,6 +567,54 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--settings-hints-visible") {
+            // Both explanatory notes next to the shortcut dropdowns were created but never
+            // positioned: zero-sized windows at the origin, invisible forever, so the
+            // settings page explained nothing about what those two rows do.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(420);
+            assert(g_state->settings_visible);
+
+            RECT client{};
+            GetClientRect(g_state->window, &client);
+            struct Probe { const wchar_t* name; HWND window; };
+            const Probe probes[] = {
+                {L"slot_row_hint", g_state->slot_row_hint},
+                {L"result_digit_hint", g_state->result_digit_hint},
+            };
+            for (const auto& probe : probes) {
+                assert(probe.window && IsWindow(probe.window));
+                RECT box{};
+                GetWindowRect(probe.window, &box);
+                const int w = box.right - box.left, h = box.bottom - box.top;
+                wchar_t text[256]{};
+                GetWindowTextW(probe.window, text, 256);
+                std::cout << "  " << wide_to_utf8(probe.name) << " " << w << "x" << h
+                          << " visible=" << (IsWindowVisible(probe.window) ? 1 : 0)
+                          << " text=" << wide_to_utf8(text) << "\n";
+                // Real size, on screen, with text: a zero-sized control is the bug.
+                assert(w > 40 && h > 4);
+                assert(IsWindowVisible(probe.window));
+                assert(text[0] != L'\0');
+                // Fully inside the client area, so it is not painted off the page.
+                POINT origin{box.left, box.top};
+                ScreenToClient(g_state->window, &origin);
+                assert(origin.x >= 0);
+                assert(origin.x + w <= client.right);
+            }
+            // And the page must be tall enough to show the last row, not clip it.
+            RECT window{};
+            GetWindowRect(g_state->window, &window);
+            RECT last{};
+            assert(GetWindowRect(g_state->result_digit_hint, &last));
+            assert(last.bottom <= window.bottom);
+            std::cout << "  window height=" << (window.bottom - window.top)
+                      << " last hint bottom=" << last.bottom << "\n";
+            std::cout << "PASS both settings notes are positioned, visible and inside the page\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--no-dialog-on-failure") {
             // The reported "第一次使用效果会出现弹窗" had two sources: AE's script refusal
             // (handled by the queue) and our own MessageBox paths. A failed apply must

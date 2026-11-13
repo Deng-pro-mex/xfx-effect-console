@@ -131,12 +131,12 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.51";
+constexpr char kProductVersion[] = "1.5.52";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
 // Room for the results digit-shortcut row added above the update entry.
-constexpr int kSettingsHeight = 272;
+constexpr int kSettingsHeight = 320;
 constexpr int kResultHeight = 28;
 constexpr int kResultActionWidth = 24;
 constexpr int kShortcutColumnWidth = 55;
@@ -4610,9 +4610,18 @@ void layout_controls(HWND hwnd) {
     setting(g_state->slot_row_caption, pad, y, label_w, row_h);
     setting(g_state->slot_row_key, control_x, y, control_w, row_h, 24);
 
+    // The note that explains what the two shortcut rows do. It was created but never
+    // positioned, so it stayed a zero-sized window at the origin and the page explained
+    // nothing about the shortcut rows.
+    y = next_row(16);
+    setting(g_state->slot_row_hint, control_x, y, control_w, 16);
+
     y = next_row(row_h);
     setting(g_state->result_digit_caption, pad, y, label_w, row_h);
     setting(g_state->result_digit_key, control_x, y, control_w, row_h, 24);
+
+    y = next_row(16);
+    setting(g_state->result_digit_hint, control_x, y, control_w, 16);
 
     y = next_row(row_h);
     setting(g_state->ime_caption, pad, y, label_w, row_h);
@@ -5249,7 +5258,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             theme_combo_popup(combo);
         }
         create_control(hwnd, &g_state->result_digit_hint, L"STATIC",
-                       L"数字 1-9 固定，只调整修饰键",
+                       L"数字固定是 1-9，只改前面按住的键",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kResultDigitHintId);
         create_control(hwnd, &g_state->slot_row_caption, L"STATIC", L"第二行快捷栏",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kSlotRowCaptionId);
@@ -5262,7 +5271,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         create_control(hwnd, &g_state->theme_caption, L"STATIC", L"界面主题",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, kThemeCaptionId);
         create_control(hwnd, &g_state->slot_row_hint, L"STATIC",
-                       L"快捷键与第三行无关",
+                       L"选中效果后按 Shift + 数字，可直接绑到第二行",
                        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFTNOWORDWRAP, kSlotRowHintId);
         create_control(hwnd, &g_state->update_button, L"BUTTON", L"检查更新", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, kUpdateId);
         create_control(hwnd, &g_state->status, L"STATIC", L"正在扫描...",
@@ -5383,7 +5392,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_state && g_state->search) {
             if(g_state->settings_visible && !g_state->settings_animation_active) {
                 RECT client{};GetClientRect(hwnd,&client);
-                const int target=client.right*96/GetDpiForWindow(hwnd)<440?330:kSettingsHeight;
+                const int target=client.right*96/GetDpiForWindow(hwnd)<440?378:kSettingsHeight;
                 g_state->expand_to=target;
                 if(g_state->settings_extent!=target) {
                     g_state->settings_extent=target;adjust_console_height();
@@ -5858,7 +5867,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             RECT rect{}; GetWindowRect(hwnd, &rect);
             g_state->settings_visible = !g_state->settings_visible;
             RECT client{}; GetClientRect(hwnd,&client);
-            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 330 : kSettingsHeight) : 0;
+            const int target = g_state->settings_visible ? (client.right*96/GetDpiForWindow(hwnd)<440 ? 378 : kSettingsHeight) : 0;
             g_state->expand_from = g_state->settings_extent; g_state->expand_to = target;
             g_state->expand_started = GetTickCount64();
             SetWindowTextW(g_state->preferences, g_state->settings_visible ? L"设置" : L"设置");
