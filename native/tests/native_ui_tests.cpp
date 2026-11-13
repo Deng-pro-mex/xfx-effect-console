@@ -567,6 +567,110 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--settings-bool-roundtrip") {
+            // A single off-by-one in the parser made "ResultDigitShortcut=0" read back as
+            // enabled, so the switch could never be turned off. Every boolean must survive
+            // BOTH values, and the file text must be exactly what was asked for.
+            struct Flag { const char* name; bool xfx::Settings::*field; const wchar_t* key; };
+            const Flag flags[] = {
+                {"result_digit_shortcut", &xfx::Settings::result_digit_shortcut, L"ResultDigitShortcut"},
+                {"show_slot_row", &xfx::Settings::show_slot_row, L"ShowSlotRow"},
+                {"auto_close", &xfx::Settings::auto_close, L"AutoClose"},
+                {"light_theme", &xfx::Settings::light_theme, L"LightTheme"},
+                {"fixed_window", &xfx::Settings::fixed_window, L"FixedWindow"},
+            };
+            for (const auto& flag : flags) {
+                for (bool value : {false, true}) {
+                    auto settings = xfx::SettingsStore::load(g_test_settings_path);
+                    settings.*(flag.field) = value;
+                    xfx::SettingsStore::save(g_test_settings_path, settings);
+                    const auto reloaded = xfx::SettingsStore::load(g_test_settings_path);
+                    std::cout << "  " << flag.name << "=" << (value ? 1 : 0)
+                              << " reloaded=" << ((reloaded.*(flag.field)) ? 1 : 0) << "\n";
+                    assert(reloaded.*(flag.field) == value);
+                    // And the raw file must carry the right digit, not just the struct.
+                    std::ifstream raw(g_test_settings_path);
+                    std::string text((std::istreambuf_iterator<char>(raw)), {});
+                    std::wstring wide = utf8_to_wide(text.c_str());
+                    const std::wstring line = std::wstring(flag.key) + L"=" +
+                        (value ? L"1" : L"0");
+                    assert(wide.find(line) != std::wstring::npos);
+                }
+            }
+            // Text fields must round-trip byte-exact too; a wrong prefix offset loses or
+            // corrupts the first character.
+            {
+                auto settings = xfx::SettingsStore::load(g_test_settings_path);
+                settings.slot_button_labels[0] = L"投影";
+                settings.slot_button_labels[4] = L"=等号开头";
+                settings.slot_labels[2] = L"光";
+                settings.slots[2] = L"ADBE Glow";
+                settings.row_slots[6] = L"ADBE Tint";
+                settings.capture_directory = L"C:\\XFX Capture Test";
+                xfx::SettingsStore::save(g_test_settings_path, settings);
+                const auto back = xfx::SettingsStore::load(g_test_settings_path);
+                assert(back.slot_button_labels[0] == L"投影");
+                assert(back.slot_button_labels[4] == L"=等号开头");
+                assert(back.slot_labels[2] == L"光");
+                assert(back.slots[2] == L"ADBE Glow");
+                assert(back.row_slots[6] == L"ADBE Tint");
+                assert(back.capture_directory == L"C:\\XFX Capture Test");
+                std::cout << "  text fields round-tripped including a leading '='\n";
+            }
+            std::cout << "PASS every boolean setting survives a save and a reload\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
+        else if (check == L"--close-keeps-strip") {
+            // save_and_restore reads BOTH shortcut combos and treats the selection as
+            // authoritative. That is only safe if the combos always mirror the stored
+            // settings; if they ever drift (or are still empty), closing the palette would
+            // silently switch the second strip OFF - the reported "the strip keeps turning
+            // itself off". This drives the real open/close cycle and checks the file.
+            if (IsWindow(g_state->window)) { SendMessageW(g_state->window, WM_CLOSE, 0, 0); pump_for(80); }
+            g_state->settings.show_slot_row = true;
+            g_state->settings.slot_row_modifier = L"Alt";
+            g_state->settings.result_digit_shortcut = false;
+            g_state->settings.row_slots[0] = item_key(g_test_catalog[0]);
+            xfx::SettingsStore::save(g_test_settings_path, g_state->settings);
+
+            show_console();
+            pump_for(220);
+            assert(IsWindow(g_state->window));
+            // The combos must already show what is stored, before the page is ever opened.
+            {
+                const LRESULT slot_sel = SendMessageW(
+                    GetDlgItem(g_state->window, kSlotRowKeyId), CB_GETCURSEL, 0, 0);
+                const LRESULT digit_sel = SendMessageW(
+                    GetDlgItem(g_state->window, kResultDigitKeyId), CB_GETCURSEL, 0, 0);
+                std::cout << "  combos on open: slotRow=" << slot_sel
+                          << " digit=" << digit_sel << "\n";
+                assert(slot_sel == 3);    // Alt + 数字
+                assert(digit_sel == 0);   // 关闭
+            }
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(160);
+
+            const auto after_close = xfx::SettingsStore::load(g_test_settings_path);
+            std::cout << "  after close: show_slot_row=" << (after_close.show_slot_row ? 1 : 0)
+                      << " modifier=" << wide_to_utf8(after_close.slot_row_modifier.c_str())
+                      << " slot0=" << (after_close.row_slots[0].empty() ? "empty" : "bound") << "\n";
+            assert(after_close.show_slot_row);
+            assert(after_close.slot_row_modifier == L"Alt");
+            assert(!after_close.row_slots[0].empty());
+
+            // A second open/close cycle must be a no-op for the setting.
+            show_console();
+            pump_for(220);
+            SendMessageW(g_state->window, WM_CLOSE, 0, 0);
+            pump_for(160);
+            const auto again = xfx::SettingsStore::load(g_test_settings_path);
+            assert(again.show_slot_row);
+            assert(again.slot_row_modifier == L"Alt");
+            std::cout << "PASS closing the palette never resets the second strip\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--modal-depth-balanced") {
             // modal_depth gates auto-close, the drag poll and "is the palette busy". One
             // leaked increment leaves the palette permanently modal: it stops closing on

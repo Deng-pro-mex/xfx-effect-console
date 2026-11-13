@@ -153,7 +153,10 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
             settings.theme_mode = mode == L"light" ? ThemeMode::Light : mode == L"dark" ? ThemeMode::Dark : ThemeMode::Follow;
             explicit_theme_mode = true;
         } else if (line.rfind(L"ResultDigitShortcut=", 0) == 0) {
-            settings.result_digit_shortcut = line.substr(19) != L"0";
+            // "ResultDigitShortcut=" is 20 characters: substr(19) started on the '=' and
+            // every value - including 0 - read back as "not 0", so the shortcut could never
+            // be turned off.
+            settings.result_digit_shortcut = line.substr(20) != L"0";
         } else if (line.rfind(L"DiagnosticLogging=", 0) == 0) {
             // No longer user configurable; parsed for compatibility only.
             settings.diagnostic_logging = true;
@@ -179,6 +182,7 @@ Settings SettingsStore::load(const std::filesystem::path& path, bool required) {
                 } catch (...) { throw std::invalid_argument("第二行快捷栏索引必须是 0-8 的数字。"); }
             }
         } else if (line.rfind(L"SlotButtonLabel=", 0) == 0) {
+            // "SlotButtonLabel=" is 16 characters, so the value starts at 16.
             const auto rest = line.substr(16);
             const auto tab = rest.find(L'=');
             if (tab != std::wstring::npos) {
