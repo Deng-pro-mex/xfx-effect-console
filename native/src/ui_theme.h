@@ -3,6 +3,7 @@
 #include <windows.h>
 #include "settings.h"
 #include <optional>
+#include <cmath>
 
 namespace xfx {
 
@@ -39,6 +40,10 @@ struct ThemeColors {
 // false preserves the existing dark theme; returned palettes have static lifetime.
 const ThemeColors& theme_colors(bool light_theme) noexcept;
 bool is_light_background(COLORREF background) noexcept;
+// WCAG helpers, exposed so the tests can assert the same budget the palette is built to.
+double relative_luminance(COLORREF colour) noexcept;
+double contrast_ratio(COLORREF first, COLORREF second) noexcept;
+bool palette_is_readable(const ThemeColors& colours) noexcept;
 ThemeColors resolve_theme(ThemeMode mode, std::optional<COLORREF> host_background = {}) noexcept;
 
 } // namespace xfx

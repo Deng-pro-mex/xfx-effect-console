@@ -50,9 +50,36 @@ const ThemeColors& theme_colors(bool light_theme) noexcept {
     return light_theme ? kLight : kDark;
 }
 
+double relative_luminance(COLORREF colour) noexcept {
+    const auto channel = [](int value) {
+        const double scaled = value / 255.0;
+        return scaled <= 0.03928 ? scaled / 12.92
+                                 : std::pow((scaled + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(GetRValue(colour)) + 0.7152 * channel(GetGValue(colour)) +
+        0.0722 * channel(GetBValue(colour));
+}
+
+double contrast_ratio(COLORREF first, COLORREF second) noexcept {
+    const double a = relative_luminance(first), b = relative_luminance(second);
+    const double lighter = (std::max)(a, b), darker = (std::min)(a, b);
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
 bool is_light_background(COLORREF background) noexcept {
     return GetRValue(background) * 0.2126 + GetGValue(background) * 0.7152 +
         GetBValue(background) * 0.0722 >= 140;
+}
+
+// A host background in the middle of the range leaves BOTH ink families unreadable: the
+// dark palette's 200-grey text on a 128-grey page is only 2.4:1, and the muted rows drop to
+// 1.7:1 - effectively invisible. The host's own panel colour is not worth unreadable text,
+// so when the derived page fails the contrast budget the plain palette is used instead.
+bool palette_is_readable(const ThemeColors& colours) noexcept {
+    return contrast_ratio(colours.text, colours.background) >= 4.5 &&
+           contrast_ratio(colours.text, colours.input) >= 4.5 &&
+           contrast_ratio(colours.selected_text, colours.selected) >= 4.5 &&
+           contrast_ratio(colours.muted, colours.background) >= 3.0;
 }
 
 ThemeColors resolve_theme(ThemeMode mode, std::optional<COLORREF> host_background) noexcept {
@@ -75,6 +102,9 @@ ThemeColors resolve_theme(ThemeMode mode, std::optional<COLORREF> host_backgroun
     c.button = shade(light ? -12 : 18); c.button_pressed = shade(light ? -26 : 36);
     c.divider = shade(light ? -48 : 41);
     c.search = shade(light ? 18 : 16);
+    // A host colour that lands in the middle of the range produces a page where its own
+    // text cannot be read. Fall back to the palette that is guaranteed readable.
+    if (!palette_is_readable(c)) return light ? kLight : kDark;
     return c;
 }
 

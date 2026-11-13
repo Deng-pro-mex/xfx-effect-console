@@ -567,6 +567,57 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--theme-contrast") {
+            // Light mode shades the palette from the HOST background. If the host reports a
+            // mid-grey the derived surface can land on the text colour, and the panel turns
+            // into unreadable grey-on-grey. Assert a real contrast ratio for both themes and
+            // for a range of host backgrounds.
+            const auto luminance = [](COLORREF c) { return xfx::relative_luminance(c); };
+            const auto contrast = [](COLORREF a, COLORREF b) {
+                return xfx::contrast_ratio(a, b);
+            };
+            struct Case { const wchar_t* name; xfx::ThemeMode mode; std::optional<COLORREF> host; };
+            const Case cases[] = {
+                {L"dark", xfx::ThemeMode::Dark, std::nullopt},
+                {L"light", xfx::ThemeMode::Light, std::nullopt},
+                {L"follow-dark-host", xfx::ThemeMode::Follow, RGB(32, 32, 32)},
+                {L"follow-light-host", xfx::ThemeMode::Follow, RGB(237, 237, 237)},
+                {L"follow-mid-host", xfx::ThemeMode::Follow, RGB(128, 128, 128)},
+                {L"follow-white-host", xfx::ThemeMode::Follow, RGB(255, 255, 255)},
+                {L"follow-black-host", xfx::ThemeMode::Follow, RGB(0, 0, 0)},
+            };
+            for (const auto& entry : cases) {
+                const auto palette = xfx::resolve_theme(entry.mode, entry.host);
+                const double text = contrast(palette.text, palette.background);
+                const double muted = contrast(palette.muted, palette.background);
+                const double input = contrast(palette.text, palette.input);
+                const double selected = contrast(palette.selected_text, palette.selected);
+                std::wcout << L"  " << entry.name
+                           << L" text=" << static_cast<int>(text * 100) / 100.0
+                           << L" muted=" << static_cast<int>(muted * 100) / 100.0
+                           << L" input=" << static_cast<int>(input * 100) / 100.0
+                           << L" selected=" << static_cast<int>(selected * 100) / 100.0 << L"\n";
+                // WCAG AA for body text is 4.5; the muted rows are secondary, 3.0.
+                assert(text >= 4.5);
+                assert(input >= 4.5);
+                assert(selected >= 4.5);
+                assert(muted >= 3.0);
+            }
+            // The measured colour of the panel itself must agree with the chosen palette,
+            // otherwise the theme is computed but never applied.
+            set_theme_mode(xfx::ThemeMode::Light);
+            pump_for(160);
+            const auto applied = colors();
+            std::cout << "  applied light background=#"
+                      << std::hex << (applied.background & 0xFFFFFF) << std::dec << "\n";
+            assert(luminance(applied.background) > 0.5);
+            set_theme_mode(xfx::ThemeMode::Dark);
+            pump_for(160);
+            assert(luminance(colors().background) < 0.2);
+            std::cout << "PASS both themes keep readable contrast and are actually applied\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--settings-hints-visible") {
             // Both explanatory notes next to the shortcut dropdowns were created but never
             // positioned: zero-sized windows at the origin, invisible forever, so the
