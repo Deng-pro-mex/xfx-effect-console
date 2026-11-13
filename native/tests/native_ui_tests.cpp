@@ -567,6 +567,95 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--popup-screenshot") {
+            // Direct visual proof for the two reported dropdown bugs: the list was all
+            // white and every corner was square. Open each dropdown and capture the REAL
+            // popup window, then measure it: white pixels, corner pixels against the
+            // middle, and the window region.
+            show_console();
+            SendMessageW(g_state->window, WM_COMMAND, kPreferencesId, 0);
+            pump_for(300);
+            const int ids[] = {kFilterId, kLightThemeId, kImeModeId,
+                               kSlotRowKeyId, kResultDigitKeyId, kHotkeyComboId};
+            const wchar_t* names[] = {L"filter", L"theme", L"ime",
+                                      L"slotrow", L"digit", L"hotkey"};
+            for (int index = 0; index < 6; ++index) {
+                const HWND combo = GetDlgItem(g_state->window, ids[index]);
+                assert(combo && IsWindowVisible(combo));
+                SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+                pump_for(200);
+                COMBOBOXINFO info{sizeof(info)};
+                assert(GetComboBoxInfo(combo, &info));
+                const HWND popup = info.hwndList;
+                assert(popup && IsWindow(popup));
+                RECT box{};
+                assert(GetWindowRect(popup, &box));
+                const int width = box.right - box.left, height = box.bottom - box.top;
+                assert(width > 10 && height > 10);
+
+                HDC screen = GetDC(nullptr);
+                HDC memory = CreateCompatibleDC(screen);
+                HBITMAP shot = CreateCompatibleBitmap(screen, width, height);
+                const auto previous = SelectObject(memory, shot);
+                const bool copied = BitBlt(memory, 0, 0, width, height, screen,
+                    box.left, box.top, SRCCOPY) != FALSE;
+                assert(copied);
+
+                // White means "the system default list painted over our theme".
+                long white = 0;
+                long total = 0;
+                COLORREF middle = 0;
+                for (int y = 2; y < height - 2; y += 2) {
+                    for (int x = 2; x < width - 2; x += 2) {
+                        const COLORREF pixel = GetPixel(memory, x, y);
+                        if (pixel == CLR_INVALID) continue;
+                        ++total;
+                        const int r = GetRValue(pixel), g = GetGValue(pixel), b = GetBValue(pixel);
+                        if (r > 235 && g > 235 && b > 235) ++white;
+                        if (x == width / 2 && y == height / 2) middle = pixel;
+                    }
+                }
+                assert(total > 0);
+                const int white_percent = static_cast<int>(white * 100 / total);
+
+                // The four corners must be cut off by the rounded region, and the middle
+                // must not be: a square popup fails this immediately.
+                HRGN region = CreateRectRgn(0, 0, 0, 0);
+                const int region_type = GetWindowRgn(popup, region);
+                bool rounded = false;
+                if (region_type != ERROR) {
+                    rounded = PtInRegion(region, 1, 1) == FALSE &&
+                              PtInRegion(region, width / 2, height / 2) != FALSE;
+                }
+                DeleteObject(region);
+
+                // Screenshot per dropdown so the evidence can be looked at.
+                if (index == 4 && argc > 1) {
+                    Gdiplus::Bitmap bitmap(shot, nullptr);
+                    CLSID png{};
+                    CLSIDFromString(L"{557cf406-1a04-11d3-9a73-0000f81ef32e}", &png);
+                    bitmap.Save((fs::path(argv[1]).parent_path() / L"dropdown-open.png").c_str(), &png,
+                        nullptr);
+                }
+
+                std::cout << "  " << wide_to_utf8(names[index]) << ": " << width << "x" << height
+                          << " white=" << white_percent << "% region=" << region_type
+                          << " rounded=" << (rounded ? 1 : 0)
+                          << " middle=#" << std::hex << (middle & 0xFFFFFF) << std::dec << "\n";
+                assert(white_percent < 40);      // it must NOT be the system white list
+                assert(middle != 0x00FFFFFF);    // centre is our dark surface
+                assert(rounded);                  // corners are cut off by the region
+                SelectObject(memory, previous);
+                DeleteObject(shot);
+                DeleteDC(memory);
+                ReleaseDC(nullptr, screen);
+                SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+                pump_for(120);
+            }
+            std::cout << "PASS every open dropdown is dark, rounded and unclipped\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--keyboard-row-bind") {
             // "选择绑定第二行" - binding a SELECTED result to the second row without a
             // drag. Type, highlight, Shift+digit. The old branch also required Alt, so the
