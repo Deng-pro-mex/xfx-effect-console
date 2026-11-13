@@ -131,7 +131,7 @@ constexpr int kCaptureLocationLabelId = 1036;
 constexpr int kFullResolutionId = 1037;
 constexpr int kThumbnailCacheClearId = 1038;
 constexpr int kUpdateId = 1039;
-constexpr char kProductVersion[] = "1.5.62";
+constexpr char kProductVersion[] = "1.5.63";
 constexpr int kLayerStyleFirstId = 1100;
 constexpr int kLayerStyleRowHeight = 36;
 constexpr int kSlotRowHeight = 44;
@@ -870,6 +870,8 @@ void assign_row_slot(int slot);
 void show_slot_row_menu(int slot);
 // Binds an explicit list row; drag-and-drop resolves the row before selection changes.
 void assign_row_slot_dragged(int slot, int row);
+// Opens the result context menu (bind to shortcut slot / second strip, aliases, pin).
+void show_result_menu(HWND hwnd, LPARAM location);
 
 LRESULT CALLBACK button_hover_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR) {
@@ -2191,6 +2193,30 @@ LRESULT CALLBACK results_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         g_state->result_click_row = -1;
         g_state->result_click_action = ResultAction::None;
         if (message == WM_CANCELMODE && GetCapture() == hwnd) ReleaseCapture();
+        return 0;
+    }
+    if (message == WM_RBUTTONUP) {
+        // A listbox does not hand right-clicks to its parent, so the result menu - which is
+        // where "bind to the second strip" lives - was unreachable with the mouse. Select
+        // the row under the cursor and open the menu from here.
+        const LRESULT hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lparam);
+        if (!HIWORD(hit)) {
+            const int row = static_cast<int>(LOWORD(hit));
+            SendMessageW(hwnd, LB_SETCURSEL, row, 0);
+            POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ClientToScreen(hwnd, &point);
+            show_result_menu(hwnd, MAKELPARAM(point.x, point.y));
+        }
+        return 0;
+    }
+    if (message == WM_CONTEXTMENU) {
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (point.x == -1 && point.y == -1) GetCursorPos(&point);
+        POINT client = point;
+        ScreenToClient(hwnd, &client);
+        const LRESULT hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(client.x, client.y));
+        if (!HIWORD(hit)) SendMessageW(hwnd, LB_SETCURSEL, static_cast<int>(LOWORD(hit)), 0);
+        show_result_menu(hwnd, MAKELPARAM(point.x, point.y));
         return 0;
     }
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {

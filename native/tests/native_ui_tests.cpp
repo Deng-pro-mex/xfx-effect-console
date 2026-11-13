@@ -2485,6 +2485,43 @@ int wmain(int argc, wchar_t** argv) {
             death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
             return 0;
         }
+        else if (check == L"--right-click-menu") {
+            // A listbox never forwards right-clicks to its parent, so the result menu - the
+            // only mouse route to "bind to the second strip" - never opened. This drives the
+            // real right-click message and requires the menu to appear.
+            show_console();
+            g_state->settings.show_slot_row = true;
+            for (auto& slot : g_state->settings.row_slots) slot.clear();
+            SetWindowTextW(g_state->search, L"gao");
+            populate_results();
+            layout_controls(g_state->window);
+            adjust_console_height();
+            pump_for(220);
+            const int rows_now = static_cast<int>(SendMessageW(g_state->results, LB_GETCOUNT, 0, 0));
+            assert(rows_now > 0);
+            const int target_row = rows_now > 1 ? 1 : 0;
+            RECT row{};
+            assert(SendMessageW(g_state->results, LB_GETITEMRECT, target_row,
+                reinterpret_cast<LPARAM>(&row)) != LB_ERR);
+            const auto data = SendMessageW(g_state->results, LB_GETITEMDATA, target_row, 0);
+            assert(data && data != LB_ERR);
+            const auto expected = item_key(*reinterpret_cast<const xfx::CatalogItem*>(data));
+
+            // The popup itself is a modal loop; the test hook answers it with the command
+            // that a click on "第二行快捷栏 > 6" would send.
+            g_test_popup_command = static_cast<UINT>(70 + 5);
+            SendMessageW(g_state->results, WM_RBUTTONUP, 0,
+                MAKELPARAM(12, (row.top + row.bottom) / 2));
+            pump_for(120);
+            std::cout << "  right-click bound slot6="
+                      << (g_state->settings.row_slots[5].empty() ? "EMPTY" : "bound") << "\n";
+            assert(g_state->settings.row_slots[5] == expected);
+            // And selecting the row under the cursor happened, so the menu acted on it.
+            assert(SendMessageW(g_state->results, LB_GETCURSEL, 0, 0) == target_row);
+            std::cout << "PASS right-clicking a result opens its menu and binds the strip\n";
+            death_hook(nullptr, reinterpret_cast<AEGP_DeathRefcon>(g_state));
+            return 0;
+        }
         else if (check == L"--menu-row-bind") {
             // The results context menu carries a 第二行快捷栏 submenu whose items are
             // numbered 70+slot. Those numbers must bind the row slot - not fall through
